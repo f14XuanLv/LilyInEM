@@ -229,6 +229,54 @@ void keep_menu_focus() {
     }
 }
 
+// ---- direct menus ----
+
+// EM bench buttons skip EL's sit-down event entirely and spawn the target menu straight into the
+// viewport. This mirrors the native rest-menu button handlers (WBP_RestMenu ubergraph):
+// SetCanChangeEquipment -> Create -> SetIntPropertyByName(DefaultPageIndex) -> AddToViewport(10).
+// DefaultPageIndex is ExposeOnSpawn and read by WBP_MainMenu::Construct, so it must be written
+// between Create and AddToViewport.
+constexpr const wchar_t* kMainMenuClass = L"/Game/_Zenith/UI/MainMenu/WBP_MainMenu.WBP_MainMenu_C";
+constexpr const wchar_t* kStrengthenClass = L"/Game/_Zenith/UI/Strengthen/WBP_Strengthen.WBP_Strengthen_C";
+
+UObject* spawn_menu(UObject* pc, const wchar_t* class_path, int page) {
+    UObject* lib = ue::find(L"/Script/UMG.Default__WidgetBlueprintLibrary");
+    UClass* cls = ue::load_class(class_path);
+    if (!lib || !cls || !pc) return nullptr;
+    Call create(lib, L"Create");
+    if (!create.o(pc).o(cls).o(pc).go()) return nullptr;
+    UObject* w = create.ro();
+    if (!w) return nullptr;
+    if (page >= 0) ue::set_num(w, L"DefaultPageIndex", static_cast<double>(page));
+    int zorder = 500; // GetUMGZOrder(EUMGZOrderLayer::Menu=10) -> 500, same layer the event uses
+    if (UObject* rbfl = ue::find(L"/Script/Zenith.Default__RenderBPFLibrary")) {
+        Call z(rbfl, L"GetUMGZOrder");
+        if (z.i(10).go()) zorder = static_cast<int>(z.ri());
+    }
+    Call(w, L"AddToViewport").i(zorder).go();
+    return w;
+}
+
+void open_menu(UObject* pc, const V3& at, MenuKind kind) {
+    if (kind == MenuKind::Rest) {
+        open_rest_menu(pc, at);
+        return;
+    }
+    if (!g.menus.empty()) return; // never stack a second EL menu
+    // same unlock the rest menu applies before opening its loadout pages (also the OPMod's toggle)
+    if (UObject* se = ue::obj(pc, L"SpiritEquipComponent")) Call(se, L"SetCanChangeEquipment").b(true).go();
+    const wchar_t* cls = nullptr;
+    int page = -1;
+    switch (kind) {
+    case MenuKind::Spirits: cls = kMainMenuClass; page = 1; break;
+    case MenuKind::Relics: cls = kMainMenuClass; page = 2; break;
+    case MenuKind::Strengthen: cls = kStrengthenClass; break;
+    default: return;
+    }
+    if (spawn_menu(pc, cls, page)) log::info(L"opened Lily's menu (kind=%d)", static_cast<int>(kind));
+    else log::warn(L"failed to open Lily's menu (kind=%d)", static_cast<int>(kind));
+}
+
 // ---- loadout ----
 
 void read_loadout(UObject* pc, UObject* pawn, Vitals& v) {
@@ -310,7 +358,7 @@ void drain_events(UObject* pc, UObject* pawn, const V3& loc) {
         switch (e.type) {
         case EventType::Hurt: combat_on_hurt(pawn, e.as<HurtPayload>()); break;
         case EventType::Restore: full_restore(pc, pawn); break;
-        case EventType::OpenMenu: open_rest_menu(pc, loc); break;
+        case EventType::OpenMenu: open_menu(pc, loc, e.as<MenuPayload>().kind); break;
         case EventType::Equip: apply_equip(pc, pawn, e.as<EquipPayload>()); break;
         default: break;
         }
@@ -544,6 +592,10 @@ void on_process_event_post(UObject* ctx, ue::UFunction* fn) {
     if (construct) {
         g.menus.emplace_back(ctx);
         if (cls == L"WBP_RestMenu_C") tidy_rest_menu(ctx);
+        // EL's map describes its own world — EM owns maps, so the category tab stays hidden (FR-MENU-EL-2)
+        else if (cls == L"WBP_MainMenu_C") {
+            if (UObject* tab = ue::obj(ctx, L"Map")) Call(tab, L"SetVisibility").i(1).go();
+        }
     } else {
         std::erase_if(g.menus, [&](const ue::Weak& w) { return w.get() == ctx || !w.get(); });
         if (cls == L"WBP_RestMenu_C" && !g.rest_pose) kneel(g.pawn.get(), false);
@@ -573,6 +625,9 @@ void debug(const std::wstring& cmd) {
     else if (cmd == L"reanchor") reset_anchor();
     else if (cmd == L"isolate" && pc && pawn) stage_isolate_all(pc, pawn);
     else if (cmd == L"menu" && pc && pawn) open_rest_menu(pc, ue::actor_location(pawn));
+    else if (cmd == L"menu2" && pc) open_menu(pc, ue::actor_location(pawn), MenuKind::Spirits);
+    else if (cmd == L"menu3" && pc) open_menu(pc, ue::actor_location(pawn), MenuKind::Relics);
+    else if (cmd == L"menu4" && pc) open_menu(pc, ue::actor_location(pawn), MenuKind::Strengthen);
     else if (cmd == L"terrain") terrain_tick(ue::world_of(pc), g.map.map, g.origin.x, true);
 }
 

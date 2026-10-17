@@ -2,7 +2,7 @@
 -- Native API registered by main.dll:
 --   LIE_HostStatus()                         one-line state + oracle counters
 --   LIE_HostAct(x, y, held, taps, frames)    scripted input through the normal Host input path
---   LIE_HostDebug(cmd)                       "rebase" | "menu" | "restore" | "kill" | "terrain" | "lilac"
+--   LIE_HostDebug(cmd)                       "rebase" | "menu" | "menu2" (spirits) | "menu3" (relics) | "menu4" (strengthen) | "restore" | "kill" | "terrain" | "lilac" | "bridge"
 
 LIE = LIE or {}
 

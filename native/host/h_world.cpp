@@ -40,12 +40,16 @@ constexpr const wchar_t* kEmMenus[] = {
     L"WBP_Pause_C", L"WBP_GameMenu_C", L"WBP_RestMenu_C", L"WBP_Shop_C", L"WBP_Settings_C",
     L"WBP_Tutorial_C", L"WBP_Recollection_C", L"WBP_SkillUnlock_C", L"WBP_PassiveUnlock_C",
 };
-// EM bench buttons that open Lilac's loadout -> Lily's native rest menu (FR-MENU-EM-2)
-constexpr const wchar_t* kRedirected[] = {
-    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetSkill_K2Node_ComponentBoundEvent_6_OnPressed__DelegateSignature",
-    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetEquipment_K2Node_ComponentBoundEvent_7_OnPressed__DelegateSignature",
-    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetPassive_K2Node_ComponentBoundEvent_8_OnPressed__DelegateSignature",
-    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SkillUpgrade_K2Node_ComponentBoundEvent_9_OnPressed__DelegateSignature",
+// EM bench buttons that open Lilac's loadout -> Lily's menus directly (FR-MENU-EM-2).
+// EM has more loadout categories than Lily: Equipment and Passives both land on EL's relic page.
+constexpr struct Redirect {
+    const wchar_t* handler;
+    MenuKind kind;
+} kRedirected[] = {
+    {L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetSkill_K2Node_ComponentBoundEvent_6_OnPressed__DelegateSignature", MenuKind::Spirits},
+    {L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetEquipment_K2Node_ComponentBoundEvent_7_OnPressed__DelegateSignature", MenuKind::Relics},
+    {L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetPassive_K2Node_ComponentBoundEvent_8_OnPressed__DelegateSignature", MenuKind::Relics},
+    {L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SkillUpgrade_K2Node_ComponentBoundEvent_9_OnPressed__DelegateSignature", MenuKind::Strengthen},
 };
 constexpr const wchar_t* kLilacTabs[] = {L"WBP_GameMenu_Tab_Equipment", L"WBP_GameMenu_Tab_Skills", L"WBP_GameMenu_Tab_Passives"};
 constexpr const wchar_t* kLilacPages[] = {L"WBP_GameMenu_Page_Equipment_C", L"WBP_GameMenu_Page_Skill_C", L"WBP_GameMenu_Page_Passive_C"};
@@ -73,7 +77,7 @@ struct State {
     HostCounters k{};
     clock::Every pc_lookup{1.0}, relock{0.25}, hud{1.0}, counters_pub{0.25};
     RC::Unreal::FName fn_construct{}, fn_destruct{}, fn_page_changed{};
-    std::vector<RC::Unreal::FName> redirected;
+    std::vector<std::pair<RC::Unreal::FName, MenuKind>> redirected;
     bool names = false;
     double puppet_err_max = 0.0;
 } g;
@@ -378,7 +382,7 @@ void tick_pre(float) {
         g.fn_construct = ue::fname(L"Construct");
         g.fn_destruct = ue::fname(L"Destruct");
         g.fn_page_changed = ue::fname(L"OnPageChanged");
-        for (const wchar_t* r : kRedirected) g.redirected.push_back(ue::fname(r));
+        for (const auto& r : kRedirected) g.redirected.emplace_back(ue::fname(r.handler), r.kind);
         g.names = true;
     }
     c->host_pid.store(GetCurrentProcessId());
@@ -475,10 +479,13 @@ void on_begin_play(UObject* actor) {
 bool on_process_event_pre(UObject* ctx, ue::UFunction* fn, void*) {
     if (!g.names || !g.locked || !ctx || !fn) return false;
     const RC::Unreal::FName n = fn->GetNamePrivate();
-    if (std::ranges::find(g.redirected, n) == g.redirected.end()) return false;
-    send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{}, clock::now_s()));
-    log::info(L"EM loadout button -> Lily's rest menu");
-    return true;
+    for (const auto& r : g.redirected) {
+        if (n != r.first) continue;
+        send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{r.second}, clock::now_s()));
+        log::info(L"EM loadout button -> Lily's menu (kind=%d)", static_cast<int>(r.second));
+        return true;
+    }
+    return false;
 }
 
 void on_process_event_post(UObject* ctx, ue::UFunction* fn, void* parms) {
@@ -521,6 +528,9 @@ void debug(const std::wstring& cmd) {
     UObject* pawn = g.pawn.get();
     if (cmd == L"rebase" && pawn) puppet_request_rebase(pawn, "debug");
     else if (cmd == L"menu") send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{}, clock::now_s()));
+    else if (cmd == L"menu2") send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Spirits}, clock::now_s()));
+    else if (cmd == L"menu3") send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Relics}, clock::now_s()));
+    else if (cmd == L"menu4") send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Strengthen}, clock::now_s()));
     else if (cmd == L"restore") send_to_guest(Event::make(EventType::Restore, LethalPayload{}, clock::now_s()));
     else if (cmd == L"kill") combat_on_event(g.pc.get(), pawn, Event::make(EventType::Lethal, LethalPayload{}, clock::now_s()));
     else if (cmd == L"terrain") terrain_reset();

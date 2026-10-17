@@ -76,7 +76,9 @@
 
 ### 菜单 / 系统
 - [ ] EL 休息菜单在 EM 长椅场景下的“休眠菜单”（跪坐时 EL 菜单隐藏，选装配时才唤醒）没有实现：目前长椅时只播放跪坐动画，F5 / 重定向会重新打开一个 EL 休息菜单。
-- [ ] 打开 EL 菜单依赖当前 EL 地图里有 `BP_Interactable_RestingPoint_C`；地图里没有时会失败（只写日志）。
+- [ ] ~~打开 EL 菜单依赖休息点~~（2026-10-18 已缓解）：直开菜单走 `spawn_menu`（`WidgetBlueprintLibrary::Create` → `DefaultPageIndex` → `AddToViewport`），不再需要休息点；只有 `MenuKind::Rest`（F5 / debug `menu`）仍依赖地图里的 `BP_Interactable_RestingPoint_C`。
+- [ ] `WBP_MainMenu` 的 A/D 翻页按钮可能仍能翻到 Map 页：目前只把 Map 页签设为 Collapsed，`GoToPage` 循环是否跳过未验证；Record / Collection / Tips 页显示的也是 EL 存档内容，与 EM 世界是否冲突待确认。
+- [ ] `SetCanChangeEquipment` 目前开直开菜单时置 true 后没有还原；需要确认关闭菜单后该标记残留是否有副作用（参考 OPMod 的做法）。
 - [ ] EM 档案页（Records）仍显示莱拉克的数据。
 - [ ] 成长系统没有桥接：EM 的经验 / 掉落给的是莱拉克，莉莉等级和强化材料的来源待设计。
 - [ ] EM 与 EL 两边存档各自独立，没有对齐或校验。

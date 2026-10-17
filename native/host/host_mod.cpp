@@ -118,7 +118,7 @@ int lua_act(const Lua& lua) {
     return 1;
 }
 
-// LIE_HostDebug("rebase" | "menu" | "restore" | "kill" | "terrain" | "lilac" | "bridge")
+// LIE_HostDebug("rebase" | "menu" | "menu2" | "menu3" | "menu4" | "restore" | "kill" | "terrain" | "lilac" | "bridge")
 int lua_debug(const Lua& lua) {
     if (lua.is_string()) {
         const std::string cmd(lua.get_string());

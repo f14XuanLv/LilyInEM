@@ -56,7 +56,7 @@ int lua_act(const Lua& lua) {
     return 1;
 }
 
-// LIE_GuestDebug("unlock" | "restore" | "reanchor" | "isolate" | "menu" | "terrain")
+// LIE_GuestDebug("unlock" | "restore" | "reanchor" | "isolate" | "menu" | "menu2" | "menu3" | "menu4" | "terrain")
 int lua_debug(const Lua& lua) {
     if (lua.is_string()) {
         const std::string cmd(lua.get_string());

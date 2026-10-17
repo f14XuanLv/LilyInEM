@@ -214,7 +214,7 @@ enum class EventType : std::uint32_t {
     // H -> G
     Hurt = 1,       // EM hit Lilac: EL settles it natively
     Restore = 2,    // EM bench / respawn: FullyRestore Lily
-    OpenMenu = 3,   // open Lily's native rest menu
+    OpenMenu = 3,   // open a Lily menu (MenuKind selects which)
     Equip = 4,      // loadout command from the overlay panel
     // G -> H
     HitEnemy = 100, // EL hitbox hit an EM-enemy proxy: EM settles it natively
@@ -229,7 +229,12 @@ struct HurtPayload {
     float dir_y = 0.0f;             // sign of the push along Y (+1 right)
 };
 
-enum class MenuKind : std::uint32_t { Rest = 1 };
+enum class MenuKind : std::uint32_t {
+    Rest = 1,        // native rest point: full sit-down event (F5 / debug "menu")
+    Spirits = 2,     // WBP_MainMenu page 1 (Page_Equipment): spirit loadout
+    Relics = 3,      // WBP_MainMenu page 2 (Page_Passive): relic loadout
+    Strengthen = 4,  // WBP_Strengthen: spirit strengthening
+};
 struct MenuPayload {
     MenuKind kind = MenuKind::Rest;
 };
