@@ -96,8 +96,11 @@ void classify(UObject* actor) {
         return;
     }
     if (owned_by(actor, lily, pc)) return;
-    for (const wchar_t* keep : {L"Camera", L"GameMode", L"GameState", L"PlayerState", L"LevelScript", L"HUD", L"PhysicsVolume", L"GameSession",
-                                L"GameNetworkManager", L"ParticleEventManager", L"NavData", L"Brush", L"WorldLoader"}) {
+    // Only the engine's default physics volume survives: EL water (BP_CustomPhysicsVolume_Water_C) and every other
+    // map volume would make Lily swim / slow down and render into the exported frame. Water comes from EM (S4).
+    if (cls == L"DefaultPhysicsVolume") return;
+    for (const wchar_t* keep : {L"Camera", L"GameMode", L"GameState", L"PlayerState", L"LevelScript", L"HUD", L"GameSession",
+                                L"GameNetworkManager", L"ParticleEventManager", L"NavData", L"WorldLoader"}) {
         if (has(keep)) return;
     }
     if (ue::is_a(actor, ue::find_class(L"/Script/Zenith.ZenithCharacter"))) {

@@ -47,6 +47,9 @@ constexpr const wchar_t* kBlockedHandlers[] = {
 
 // [POLICY] recenter before Lily leaves 40 % of the enlarged camera clamp volume (500000 UU, g_stage.cpp)
 constexpr double kRecenterRadius = 200000.0;
+// [POLICY] studio height above the loaded EL map: far outside any EL room yet well inside the enlarged camera
+// clamp volume (500000) and the recenter radius, so the clamp keeps working and no recenter is triggered.
+constexpr double kStudioLift = 60000.0;
 
 struct State {
     ue::Weak pc, pawn, rest_point;
@@ -143,9 +146,13 @@ void unlock_all(UObject* pc, UObject* pawn) {
     log::info(L"unlocked all spirits / relics / aptitudes");
 }
 
-void anchor(UObject* pc, UObject* pawn, const V3& loc) {
-    g.origin = loc;
+void anchor(UObject* pc, UObject* pawn, V3& loc) {
     stage_isolate_all(pc, pawn);
+    // The studio floats far above the loaded EL map: whatever the isolation misses (late spawns, streamed
+    // sub-levels, volumes) can never overlap Lily or the mirrored terrain. Lily is held, so this is invisible.
+    loc.z += kStudioLift;
+    ue::set_actor_location(pawn, loc);
+    g.origin = loc;
     stage_headless(pc, pawn);
     unlock_aptitudes(pc, pawn);
     full_restore(pc, pawn);

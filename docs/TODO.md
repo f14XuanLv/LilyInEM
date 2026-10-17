@@ -14,6 +14,17 @@
 | Host | `native/host/*` | `h_world` 编排 / 上下文 / 菜单 / 锁定 / 面片；`h_puppet`；`h_terrain`；`h_combat`；`h_render` |
 | 命令 | `build.bat [core] [test]`、`tools/{deploy,start,stop,eval,capture}.ps1` | 路径只来自 `devconfig.json` |
 
+## 0.5 EL 无头引擎（摄影棚）现状
+- **所在地图**：EL 标题画面自动读取存档槽 0（独立 UserDir 里的副本），停在存档所在的 EL 地图。2026-10-17 实测是 `map_church_08`（`PersistentGameMap`）。没有专用空地图：EL 的游戏流程（WorldLoaderSubsystem、休息点、精灵）需要一张真实的 GameMap。
+- **地图的角色**：EL 地图的地形 **不重要，也不应该起任何作用**。莉莉脚下唯一有效的碰撞是 EM 地形镜像的 Static 盒池；EL 地图只提供一个能运行游戏逻辑的世界。
+- **隔离规则**（`g_stage.cpp`）：锚定时全量扫描一次，之后对 BeginPlay 增量判定。
+  - 除以下几类外，所有 Actor 都隐藏并关闭碰撞：莉莉、精灵及其能力、相机、`BP_CameraClampVolume_C`（必须保活，只把它的 4 个阻挡盒关掉，并扩大到 500000）、引擎基础设施、`DefaultPhysicsVolume`、EL 休息点（用于跪坐和打开菜单）。
+  - EL 敌人额外关闭 Tick。
+- **摄影棚抬升（2026-10-17 新增）**：锚定时把莉莉抬到 EL 地图上方 60000 UU（`kStudioLift`），被漏掉的物体、后生成的物体、流式加载的子关卡都碰不到她。
+- **已修复的问题**：旧规则只要类名含 `PhysicsVolume` 就保留，导致 EL 的 `BP_CustomPhysicsVolume_Water_C`（`map_church_08` 里有 3 个）可见且有碰撞。莉莉走到 EL 水体的位置时会进入游泳状态，EL 的水面也会被导出画面带进 EM。
+  - 现在只保留 `DefaultPhysicsVolume`。水体以后应由 EM 侧提供（S4：EM 水体 → EL `ACustomPhysicsVolumeWater` 镜像）。
+- **待做**：在 Guest 状态输出里加入“非自有、仍可见或仍有碰撞的 Actor 数”作为 Oracle（理想值为 0）；考虑固定一个“摄影棚存档”（选一张实体最少的 EL 地图），不依赖玩家存档在哪张图。
+
 ## 1. 已知问题（需要修）
 1. **地形版本号刷新过于频繁**：Lilac 移动时窗口边缘每移动一列，矩形集合就变一次，revision 几乎逐帧递增（实测约 5 秒涨了 500+）。Guest 每次只重摆变化的盒子，功能上可用，但会产生不必要的 SetMobility 切换。
    - 修法：发布时以“窗口内部、离开边缘 N 列”的区域为准；或给边缘矩形做 hysteresis，只在内部内容变化时 bump revision。
