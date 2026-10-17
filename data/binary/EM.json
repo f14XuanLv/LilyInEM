@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "game": "ENDER MAGNOLIA",
+  "engine": "UE 5.4.4",
+  "module": "EnderMagnoliaSteam-Win64-Shipping.exe",
+  "image_base_note": "0x140000000",
+  "_comment": "Version-specific binary facts for the Host. Loaded at runtime by MagnoliaHost (Mods/MagnoliaHost/data/binary.json). Every function is armed only if the running EXE SHA-256 is listed below and the bytes at rva match prefix (fail-closed). Only functions without a reflection entry belong here. Verify offline with tools/verify_binary.py.",
+  "sha256": [
+    "34FD2C50091A41FE60484AFBC08DFCFDC23AC68D2834AA93C9058FB7EC270FFA"
+  ],
+  "functions": {
+    "StatHPComponentDoDamage": {
+      "rva": "0x0473AE00",
+      "prefix": "48895C24084889742410574883EC2048",
+      "signature": "bool UStatHPComponent::DoDamage(this, AActor* Source, const FDamageData& DamageData)",
+      "note": "Called directly from C++ by AbilityEffectInstant_DamageHP (0x0479AA80), contact damage (0x046EDBB0) and status damage (0x047C2920). Host intercepts hits on Lilac here. IDA."
+    },
+    "KnockbackComponentStartKnockback": {
+      "rva": "0x04756150",
+      "prefix": "405553574157488D6C24C14881ECC800",
+      "signature": "void UKnockbackComponent::StartKnockback(this, const FKnockbackData& KnockbackData, const FVector& KnockbackDirection)",
+      "note": "Called directly from C++ by AbilityEffectInstant_Knockback (0x0479AF90). Host intercepts knockback on Lilac here. IDA."
+    }
+  },
+  "offsets": {}
+}

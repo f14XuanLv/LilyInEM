@@ -1,0 +1,5 @@
+build/
+build.*.log
+devconfig.local.json
+.vs/
+*.user

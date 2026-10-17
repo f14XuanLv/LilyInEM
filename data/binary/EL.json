@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "game": "ENDER LILIES",
+  "engine": "UE 4.26.2",
+  "module": "EnderLiliesSteam-Win64-Shipping.exe",
+  "image_base_note": "0x140000000",
+  "_comment": "Version-specific binary facts for the Guest. Loaded at runtime by LiliesGuest (Mods/LiliesGuest/data/binary.json). Every function is armed only if the running EXE SHA-256 is listed below and the bytes at rva match prefix (fail-closed). Only functions without a reflection entry belong here. Verify offline with tools/verify_binary.py.",
+  "sha256": [
+    "9B939A44457D78AF1F5E8B90EF0F88B95D7DBC35A330350F2EF1E100CDD48329"
+  ],
+  "functions": {
+    "InputConsume": {
+      "rva": "0x00CEF310",
+      "prefix": "48895C2410574883EC50",
+      "signature": "uintptr UZenithInputComponent::InputConsume(this, void* param)",
+      "note": "Consumes NextInputSnapshot(+184) into InputSnapshot(+224); the Guest overwrites InputSnapshot after the original runs. IDA."
+    },
+    "GameplayCameraUpdate": {
+      "rva": "0x00CF7B60",
+      "prefix": "4C8BDC555356574157498DAB18FFFFFF",
+      "signature": "uint64 AGameplayCamera::GameplayCameraUpdate(this, float DeltaTime, bool bLag)",
+      "note": "Forced bLag=false so Lily keeps a fixed screen point in the exported frame. IDA."
+    },
+    "HPComponentDoDamage": {
+      "rva": "0x00CA0380",
+      "prefix": "40535541564883EC3083B91401000000418BE84C8BF2488B",
+      "signature": "void UHPComponent::DoDamage(this, AActor* From, int32 Damage, bool bJustGuarding, bool bGuarding)",
+      "note": "Final HP settlement, called natively through the vtable (invisible to UFunction hooks). Guest records hits on EM-enemy proxies here. IDA + ELMP."
+    }
+  },
+  "offsets": {
+    "ZenithInputComponent.PawnOwner": 176,
+    "ZenithInputComponent.NextInputSnapshot": 184,
+    "ZenithInputComponent.InputSnapshot": 224,
+    "InputSnapshot.size": 40
+  }
+}

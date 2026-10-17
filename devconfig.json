@@ -1,0 +1,26 @@
+{
+  "_comment": "LilyInEM: single source of truth for local paths. Override per machine in devconfig.local.json (not committed).",
+  "magnoliaGame": "C:\\Game\\Steam\\steamapps\\common\\ENDER MAGNOLIA\\EnderMagnolia",
+  "liliesGame": "C:\\Game\\Steam\\steamapps\\common\\ENDER LILIES\\EnderLilies",
+  "python": "C:\\Dev\\miniconda\\python.exe",
+  "ue4ssSource": "D:\\CodeT\\RE-UE4SS-32d8a381",
+  "fetchCache": "D:\\CodeT\\Lilac2LilyMod\\build\\_deps",
+  "instances": {
+    "host": {
+      "root": "{magnoliaGame}\\Binaries\\Win64_LilyInEM",
+      "userDir": "{magnoliaGame}\\Binaries\\LilyInEM_Data\\host",
+      "exe": "EnderMagnoliaSteam-Win64-Shipping.exe",
+      "appId": "2725260",
+      "mod": "MagnoliaHost",
+      "saveSeed": "{localAppData}\\EnderMagnolia\\Saved\\SaveGames"
+    },
+    "guest": {
+      "root": "{liliesGame}\\Binaries\\Win64_LilyInEM",
+      "userDir": "{liliesGame}\\Binaries\\LilyInEM_Data\\guest",
+      "exe": "EnderLiliesSteam-Win64-Shipping.exe",
+      "appId": "1369630",
+      "mod": "LiliesGuest",
+      "saveSeed": "{localAppData}\\EnderLilies\\Saved\\SaveGames"
+    }
+  }
+}
