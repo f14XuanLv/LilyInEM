@@ -85,4 +85,3 @@
 ### 工程
 - [ ] 本仓库根目录的 `AGENTS.md`（规则、命令、事实索引）没有写。
 - [ ] Fake Host / Fake Guest 契约桩（参考 `D:\CodeT\QJRef\passthrough-mod-toolkit\stubs`）。
-- [ ] 代码还没有提交到 git（`D:\CodeT\LilyInEM` 目前没有任何 commit）。
