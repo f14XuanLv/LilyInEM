@@ -215,6 +215,7 @@ void reset_anchor() {
     stage_reset();
     terrain_reset();
     combat_reset();
+    capture_reset();
     if (Control* c = ctl()) c->map.store(g.map);
 }
 
@@ -587,6 +588,7 @@ void publish_projection(UObject* pc, const V3& foot) {
     g.view_w = static_cast<float>(w);
     g.view_h = static_cast<float>(w / aspect);
     stage_frame(g.foot_u, g.foot_v, g.view_w, g.view_h);
+    capture_tick(pc); // SceneCapture alpha channel: same POV drives the second shared texture
 }
 
 void publish_vitals(UObject* pc, UObject* pawn, const std::wstring& anim, bool slow) {

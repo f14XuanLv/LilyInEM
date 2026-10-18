@@ -38,15 +38,19 @@ namespace lie::render {
 
 namespace {
 
-// Keying against EL's black studio. [POLICY] thresholds (doc: "keying stays a separate presentation problem"):
+// True coverage alpha arrives on a second channel (chars = EL SceneCapture2D, SCS_SceneColorHDR ->
+// premult RGB + inverse opacity in A). Over the black studio the back buffer is colour premultiplied
+// by that same coverage, so straight colour = bb.rgb / cov and cov = 1 - chars.a exactly reproduces
+// EL's composite. When the channel is absent (capture not armed yet) fall back to luminance keying:
 // - a pixel whose 4 neighbours are all clearly lit is the interior of a sprite -> opaque (keeps dark detail)
 // - everything else keeps alpha = its peak channel, which reproduces additive FX over black exactly when the
 //   straight colour rgb/alpha is composited with that alpha
 constexpr const char* kKeyHlsl = R"hlsl(
 Texture2D frame : register(t0);
-Texture2D panel_tex : register(t1); // kRestPanelAlpha: row 0 rest-menu BG, row 1 footer strip (design space)
+Texture2D chars : register(t1);   // SceneCapture RGBA16F: premult rgb, A = 1 - coverage
+Texture2D panel_tex : register(t2); // kRestPanelAlpha: row 0 rest-menu BG, row 1 footer strip (design space)
 SamplerState samp : register(s0);
-cbuffer Key : register(b0) { float2 texel; float gain; float out_linear; float split_on; float panel_u; float menu_alpha; float footer_v; float4 split; };
+cbuffer Key : register(b0) { float2 texel; float gain; float out_linear; float split_on; float panel_u; float menu_alpha; float footer_v; float chars_on; float4 split; };
 bool in_split(float2 uv) { return split_on > 0.5 && all(uv >= split.xy) && all(uv <= split.zw); }
 float peak(float3 c) { return max(c.r, max(c.g, c.b)); }
 float3 px(float2 uv) { return frame.Sample(samp, uv).rgb; }
@@ -59,6 +63,11 @@ float4 keyed(float2 uv) {
     float3 s = a > 1e-4 ? saturate(c / a) : float3(0, 0, 0);
     return float4(s, a);
 }
+float4 covered(float2 uv) {       // real alpha path: unpremultiply the back buffer by capture coverage
+    float a = 1.0 - chars.Sample(samp, uv).a;
+    float3 s = a > 1e-4 ? saturate(px(uv) / a) : float3(0, 0, 0);
+    return float4(s, a);
+}
 struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 VSOut vs_main(uint id : SV_VertexID) {
     VSOut o;
@@ -68,7 +77,7 @@ VSOut vs_main(uint id : SV_VertexID) {
 }
 float4 ps_world(VSOut i) : SV_Target {
     if (split_on > 0.5 && !in_split(i.uv)) return float4(0, 0, 0, 0); // Split: only the rect around Lily is world
-    float4 k = keyed(i.uv);
+    float4 k = chars_on > 0.5 ? covered(i.uv) : keyed(i.uv);
     float3 c = saturate(k.rgb * gain);
     if (out_linear > 0.5) c = pow(c, 2.2);
     return float4(c, k.a);
@@ -96,6 +105,7 @@ float4 ps_menu(VSOut i) : SV_Target {
 struct alignas(16) KeyCB {
     float texel_x, texel_y, gain, out_linear;
     float split_on, panel_u, menu_alpha, footer_v;
+    float chars_on, pad[3];
     float split[4];
 };
 
@@ -137,6 +147,9 @@ struct Renderer {
     std::uint64_t opened = 0;
     ID3D11Texture2D* guest_tex = nullptr;
     ID3D11ShaderResourceView* guest_srv = nullptr;
+    std::uint64_t opened_chars = 0;
+    ID3D11Texture2D* chars_tex = nullptr;
+    ID3D11ShaderResourceView* chars_srv = nullptr;
     ID3D11Texture2D* panel_tex = nullptr;
     ID3D11ShaderResourceView* panel_srv = nullptr;
     UINT gw = 0, gh = 0;
@@ -308,6 +321,27 @@ ID3D11ShaderResourceView* guest_srv(const FrameMeta& fm) {
     return g_r.guest_srv;
 }
 
+ID3D11ShaderResourceView* chars_srv(const FrameMeta& fm) {
+    if (!fm.chars_handle) return nullptr;
+    if (fm.chars_handle != g_r.opened_chars || !g_r.chars_srv) {
+        d3d::release(g_r.chars_srv);
+        d3d::release(g_r.chars_tex);
+        g_r.opened_chars = 0;
+        ID3D11Texture2D* tex = nullptr;
+        if (FAILED(g_r.dev->OpenSharedResource(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(fm.chars_handle)), __uuidof(ID3D11Texture2D),
+                                               reinterpret_cast<void**>(&tex))) || !tex)
+            return nullptr;
+        if (FAILED(g_r.dev->CreateShaderResourceView(tex, nullptr, &g_r.chars_srv))) {
+            tex->Release();
+            return nullptr;
+        }
+        g_r.chars_tex = tex;
+        g_r.opened_chars = fm.chars_handle;
+        log::info(L"scene-capture alpha channel open");
+    }
+    return g_r.chars_srv;
+}
+
 struct StateBackup {
     ID3D11RenderTargetView* rtv = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
@@ -360,7 +394,8 @@ struct StateBackup {
 };
 
 // Full-screen triangle with one of our pixel shaders into `target`
-void blit(ID3D11RenderTargetView* target, UINT w, UINT h, ID3D11PixelShader* ps, ID3D11ShaderResourceView* src, const KeyCB& cb, bool blend) {
+void blit(ID3D11RenderTargetView* target, UINT w, UINT h, ID3D11PixelShader* ps, ID3D11ShaderResourceView* src, ID3D11ShaderResourceView* chars,
+          const KeyCB& cb, bool blend) {
     auto* c = g_r.ctx;
     StateBackup bk(c);
     const D3D11_VIEWPORT vp{0, 0, static_cast<float>(w), static_cast<float>(h), 0, 1};
@@ -377,7 +412,8 @@ void blit(ID3D11RenderTargetView* target, UINT w, UINT h, ID3D11PixelShader* ps,
     c->PSSetShader(ps, nullptr, 0);
     c->PSSetConstantBuffers(0, 1, &g_r.cb);
     c->PSSetShaderResources(0, 1, &src);
-    c->PSSetShaderResources(1, 1, &g_r.panel_srv);
+    c->PSSetShaderResources(1, 1, &chars);
+    c->PSSetShaderResources(2, 1, &g_r.panel_srv);
     c->PSSetSamplers(0, 1, &g_r.sampler);
     c->Draw(3, 0);
     ID3D11ShaderResourceView* none = nullptr;
@@ -582,11 +618,13 @@ void render_frame(IDXGISwapChain* swap) {
     FrameMeta fm{};
     const bool guest_fresh = c->frame.read(fm) && heartbeat_alive(fm.frame_ms, clock::now_ms(), facts::kHeartbeatTimeoutMs);
     ID3D11ShaderResourceView* srv = (guest_fresh && g_toggles.bridge_on) ? guest_srv(fm) : nullptr;
+    ID3D11ShaderResourceView* cap = (guest_fresh && g_toggles.bridge_on) ? chars_srv(fm) : nullptr;
     KeyCB cb{};
     if (srv) {
         cb.texel_x = 1.0f / static_cast<float>(g_r.gw);
         cb.texel_y = 1.0f / static_cast<float>(g_r.gh);
         cb.gain = g_toggles.quad_gain.load() > 0.05f ? g_toggles.quad_gain.load() : 1.0f;
+        cb.chars_on = cap ? 1.0f : 0.0f;
         // FrameKind::Menu has Lily hidden: the world layer keeps its last Lily and the menu goes on top. Split keeps
         // her live (the rect around her feeds the world layer, the rest is the menu). After a Menu frame the world
         // layer waits one more frame, in case EL's content trails its flag (no empty Lily).
@@ -608,9 +646,9 @@ void render_frame(IDXGISwapChain* swap) {
         }
         if (g_world_active && since_menu >= 2 && g_r.ps_world && ensure_world_rtv()) {
             cb.out_linear = g_r.world_linear ? 1.0f : 0.0f;
-            blit(g_r.world_rtv, facts::kWorldRtWidth, facts::kWorldRtHeight, g_r.ps_world, srv, cb, false);
+            blit(g_r.world_rtv, facts::kWorldRtWidth, facts::kWorldRtHeight, g_r.ps_world, srv, cap, cb, false);
         }
-        if (kind != FrameKind::World && g_r.ps_menu) blit(g_r.back_rtv, desc.BufferDesc.Width, desc.BufferDesc.Height, g_r.ps_menu, srv, cb, true);
+        if (kind != FrameKind::World && g_r.ps_menu) blit(g_r.back_rtv, desc.BufferDesc.Width, desc.BufferDesc.Height, g_r.ps_menu, srv, cap, cb, true);
     }
 
     ImGui::SetCurrentContext(g_r.imgui);
@@ -705,7 +743,8 @@ void shutdown() {
     if (ID3D11Texture2D* t = g_world_tex.exchange(nullptr)) t->Release();
     for (IUnknown** p : std::initializer_list<IUnknown**>{
              reinterpret_cast<IUnknown**>(&g_r.world_rtv), reinterpret_cast<IUnknown**>(&g_r.back_rtv), reinterpret_cast<IUnknown**>(&g_r.guest_srv),
-             reinterpret_cast<IUnknown**>(&g_r.guest_tex), reinterpret_cast<IUnknown**>(&g_r.panel_srv), reinterpret_cast<IUnknown**>(&g_r.panel_tex),
+             reinterpret_cast<IUnknown**>(&g_r.guest_tex), reinterpret_cast<IUnknown**>(&g_r.chars_srv), reinterpret_cast<IUnknown**>(&g_r.chars_tex),
+             reinterpret_cast<IUnknown**>(&g_r.panel_srv), reinterpret_cast<IUnknown**>(&g_r.panel_tex),
              reinterpret_cast<IUnknown**>(&g_r.vs), reinterpret_cast<IUnknown**>(&g_r.ps_world),
              reinterpret_cast<IUnknown**>(&g_r.ps_menu), reinterpret_cast<IUnknown**>(&g_r.cb), reinterpret_cast<IUnknown**>(&g_r.sampler),
              reinterpret_cast<IUnknown**>(&g_r.raster), reinterpret_cast<IUnknown**>(&g_r.no_depth), reinterpret_cast<IUnknown**>(&g_r.alpha_blend),

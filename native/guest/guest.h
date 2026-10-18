@@ -24,8 +24,17 @@ void local_input(float x, float y, std::uint32_t held, std::uint32_t taps, int f
 void arm_present();
 void stage_frame(float foot_u, float foot_v, float view_w_uu, float view_h_uu); // game thread -> next Present
 void stage_menu(FrameKind kind, const float split[4], float menu_alpha);        // how the next Presents are composited
+bool frame_dims(unsigned& w, unsigned& h);   // exported frame size (0 until the first Present)
+void capture_expect_rt(unsigned w, unsigned h); // arm the CreateTexture2D grab for the capture RT
+bool capture_rt_ready();
 void* window();
 void shutdown_frame();
+
+// ---- g_capture.cpp: SceneCapture2D -> shared texture with real coverage alpha (game thread) ----
+// The capture renders exactly what the black-studio frame shows (hidden actors render in neither),
+// giving the Host premult RGB + inverse-opacity alpha instead of a luminance key.
+void capture_tick(UObject* pc); // spawn/sync/drive the capture; safe to call every tick
+void capture_reset();
 
 // ---- g_stage.cpp: black studio + headless EL services ----
 void stage_isolate_all(UObject* pc, UObject* lily);
