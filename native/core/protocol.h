@@ -171,6 +171,10 @@ struct Control {
     // ---- Host -> Guest ----
     std::atomic<std::uint64_t> host_tick_ms{0};
     std::atomic<std::uint32_t> host_pid{0};
+    // Desired EL frame size = EM back buffer x the Host's guest_res_scale (0 = no request yet).
+    // The Guest applies it by resizing its off-screen window (r.setres would clamp to the desktop);
+    // from FrameMeta, so a resize propagates through the shared textures on its own.
+    std::atomic<std::uint32_t> guest_res_w{0}, guest_res_h{0};
     Seqlock<HostFlags> host_flags;
     Seqlock<InputFrame> input;
     Seqlock<RebaseRequest> rebase;

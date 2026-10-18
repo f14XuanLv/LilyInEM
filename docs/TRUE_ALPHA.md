@@ -68,7 +68,15 @@
 | `native/host/h_render.cpp` | `chars` 纹理 t1（panel 移 t2）、`chars_on` 开关、`covered() = s: bb.rgb/cov`；`chars_handle=0` 时回退 `keyed()` |
 | 坑 | `ensure` 撞 UE 宏 → `ensure_capture`；`ue::FProperty` 完整定义需 `<Unreal/CoreUObject/UObject/UnrealType.hpp>` |
 
-## 4. 验证
+## 4. EL 导出分辨率跟随 EM（2026-10-19 追加）
+
+整条管线本来就是归一化 UV + UU 世界尺寸，所以分辨率是自由参数：
+
+- `Control::guest_res_w/h`（Host 写，原子量）：`render_frame` 量到 EM backbuffer 尺寸就推 `EM × guest_res_scale`（默认 **5/3**，`LilyInEM.ini` `[Guest] ResScale` 可调，上不封顶）。
+- Guest `tick` 轮询到变化 → `request_frame_size` 直接 `SetWindowPos` 那个**移出屏幕的窗口**。两层桌面钳制都要绕：`r.setres`/GameUserSettings 钳到逻辑桌面（本机 2560×1600@150% = 1707×1067），UE4 自己的 `WM_GETMINMAXINFO` 也钳（ptMaxTrackSize=工作区）——所以 `g_frame` 先 `SetWindowLongPtr(GWLP_WNDPROC)` 子类化窗口、把 max track size 提到 32000，再 SetWindowPos。WM_SIZE → swap chain ResizeBuffers → 共享纹理 + capture RT 全链路自愈（实测真实到达 3200×1800）。
+- 收益：世界层和 EL 菜单都以更高分辨率渲染再经 Host 双线性降采样 = mild SSAA；EM 1920×1080 → EL 3200×1800（2.78× 像素）。
+
+## 5. 验证
 
 1. 日志三连（全绿才算通）：guest `scene capture armed (1280x720)`、`capture RT texture grabbed (format 10)`、host `scene-capture alpha channel open`。
 2. `verify_capture_rt` 无 drop 日志。

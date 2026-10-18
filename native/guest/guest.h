@@ -25,6 +25,7 @@ void arm_present();
 void stage_frame(float foot_u, float foot_v, float view_w_uu, float view_h_uu); // game thread -> next Present
 void stage_menu(FrameKind kind, const float split[4], float menu_alpha);        // how the next Presents are composited
 bool frame_dims(unsigned& w, unsigned& h);   // exported frame size (0 until the first Present)
+void request_frame_size(std::uint32_t w, std::uint32_t h); // SetWindowPos the off-screen window; beats r.setres's desktop clamp
 void capture_expect_rt(unsigned w, unsigned h); // arm the CreateTexture2D grab for the capture RT
 bool capture_rt_ready();
 void* window();

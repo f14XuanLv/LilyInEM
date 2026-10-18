@@ -357,6 +357,31 @@ bool capture_rt_ready() {
 
 void* window() { return g_hwnd.load(); }
 
+// r.setres / GameUserSettings clamp windowed resolutions to the logical desktop (1707x1067 on a
+// 2560x1600/150% display). So does UE4's WM_GETMINMAXINFO handler (max track size = work area).
+// The window lives off-screen anyway: subclass it to lift that clamp, then WM_SIZE resizes the swap chain.
+WNDPROC g_el_wndproc = nullptr;
+LRESULT CALLBACK on_el_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_GETMINMAXINFO) {
+        auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
+        mm->ptMaxSize = {32000, 32000};
+        mm->ptMaxTrackSize = {32000, 32000};
+        return 0;
+    }
+    return CallWindowProcW(g_el_wndproc, h, msg, wp, lp);
+}
+
+void request_frame_size(std::uint32_t w, std::uint32_t h) {
+    HWND hwnd = g_hwnd.load();
+    if (!hwnd) return;
+    if (!g_el_wndproc) g_el_wndproc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&on_el_wndproc)));
+    RECT wr{}, cr{};
+    if (!GetWindowRect(hwnd, &wr) || !GetClientRect(hwnd, &cr)) return;
+    const int chrome_w = (wr.right - wr.left) - (cr.right - cr.left);
+    const int chrome_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
+    SetWindowPos(hwnd, nullptr, 0, 0, static_cast<int>(w) + chrome_w, static_cast<int>(h) + chrome_h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOOWNERZORDER);
+}
+
 void shutdown_frame() {
     std::scoped_lock lk(g_x.m);
     release_textures();

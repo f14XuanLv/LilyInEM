@@ -78,6 +78,7 @@ std::vector<EquipPayload> take_equip_commands();
 
 void install();                       // DXGI Present/Resize + ID3D11Device::CreateTexture2D hooks
 void shutdown();
+void set_guest_res_scale(float s);    // EL frame = EM back buffer x this (default 5/3, LilyInEM.ini ResScale)
 bool world_rt_captured();             // the native texture of our world-layer render target was seen
 void set_world_layer(bool active);    // render thread writes the keyed Lily frame into the RT
 bool overlay_open();                  // F6 loadout panel (Overlay context)

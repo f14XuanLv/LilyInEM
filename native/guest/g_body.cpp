@@ -94,7 +94,8 @@ struct State {
     std::vector<ue::Weak> menus;
     pose::FrameTimer<120> frame_timer;
     GuestCounters k{};
-    clock::Every title_try{1.5}, title_check{0.5}, pc_lookup{1.0}, slow{0.25}, counters_pub{0.25};
+    clock::Every title_try{1.5}, title_check{0.5}, pc_lookup{1.0}, slow{0.25}, counters_pub{0.25}, res_poll{0.5};
+    std::uint32_t res_w = 0, res_h = 0; // last frame size the Host asked for (guest_res_w/h)
     int wake_taps = 0;
     double next_wake = 0.0;
     ue::Weak dormant;               // rest menu hidden while EM's fast-travel map is up
@@ -663,6 +664,19 @@ void tick() {
     if (!pc && g.pc_lookup.due(now)) {
         g.pc.set(ue::first(L"ZenithPlayerController"));
         pc = g.pc.get();
+    }
+    // The Host publishes the EL frame size it wants (EM back buffer x its res scale). r.setres would
+    // clamp to the desktop (1707x1067 logical on a 2560x1600/150% display), so we resize the off-screen
+    // window raw: WM_SIZE -> swap chain ResizeBuffers -> shared textures + capture RT rebuilt.
+    if (g.res_poll.due(now)) {
+        const std::uint32_t rw = c->guest_res_w.load(), rh = c->guest_res_h.load();
+        unsigned cur_w = 0, cur_h = 0;
+        if (rw >= 64 && rh >= 64 && frame_dims(cur_w, cur_h) && (rw != cur_w || rh != cur_h)) {
+            request_frame_size(rw, rh);
+            if (rw != g.res_w || rh != g.res_h) log::info(L"guest res -> %ux%u (window resize)", rw, rh);
+            g.res_w = rw;
+            g.res_h = rh;
+        }
     }
     UObject* pawn = pc ? ue::obj(pc, L"Pawn") : nullptr;
     if (!g.anchored && g.title_check.due(now)) g.in_title = ue::first(L"TitleMap_C") != nullptr;

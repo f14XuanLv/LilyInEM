@@ -1,10 +1,10 @@
-# Starts isolated instances: -dx11 (D3D11 hooks), windowed 1280x720, own -UserDir, 60 FPS cap.
+# Starts isolated instances: -dx11 (D3D11 hooks), windowed 1920x1080, own -UserDir, 60 FPS cap.
 #   tools\start.ps1 -Role host     # the Host launches the headless Guest itself (LilyInEM.ini)
 #   tools\start.ps1 -Role guest    # Guest alone (debugging); set LIE_SHOW_GUEST=1 to keep its window visible
 param(
     [ValidateSet('host', 'guest', 'both')][string]$Role = 'host',
-    [int]$Width = 1280,
-    [int]$Height = 720
+    [int]$Width = 1920,
+    [int]$Height = 1080
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'

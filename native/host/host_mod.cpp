@@ -67,7 +67,9 @@ bool running(const std::wstring& exe) {
 
 void launch_guest() {
     const auto file = lie::binary::mod_dir() / L"LilyInEM.ini";
-    if (!std::filesystem::exists(file) || ini(file, L"AutoLaunch", L"1") != L"1") return;
+    if (!std::filesystem::exists(file)) return;
+    if (const std::wstring s = ini(file, L"ResScale", L""); !s.empty()) lie::render::set_guest_res_scale(static_cast<float>(_wtof(s.c_str())));
+    if (ini(file, L"AutoLaunch", L"1") != L"1") return;
     const std::wstring exe = ini(file, L"Exe", L"");
     if (exe.empty() || !std::filesystem::exists(exe)) {
         lie::log::warn(L"guest exe not found (%s): auto-launch skipped", exe.c_str());

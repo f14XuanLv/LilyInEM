@@ -64,7 +64,7 @@ function Deploy-Role([string]$role) {
     if ($role -eq 'host') {
         # FR-ENG-5: the Host (parent) launches the headless Guest from this file
         $g = $cfg.instances.guest
-        $ini = @('[Guest]', 'AutoLaunch=1', ('Exe=' + (Join-Path $g.root $g.exe)), ('UserDir=' + $g.userDir), 'ExtraArgs=-ExecCmds="t.MaxFPS 60"') -join "`r`n"
+        $ini = @('[Guest]', 'AutoLaunch=1', ('Exe=' + (Join-Path $g.root $g.exe)), ('UserDir=' + $g.userDir), 'ResScale=1.666666667', 'ExtraArgs=-ExecCmds="t.MaxFPS 60"') -join "`r`n"
         Set-Content -LiteralPath (Join-Path $modDir 'LilyInEM.ini') -Value $ini -Encoding Unicode
     }
     Write-Output "[deploy] $role -> $modDir"

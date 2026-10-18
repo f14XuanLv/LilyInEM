@@ -120,6 +120,7 @@ XInputFn g_xinput = nullptr;
 WNDPROC g_wndproc = nullptr;
 
 Toggles g_toggles;
+std::atomic<float> g_res_scale{5.0f / 3.0f}; // guest_res_scale: the EL frame is EM x this in both axes
 std::atomic<ID3D11Texture2D*> g_world_tex{nullptr};
 std::atomic<bool> g_world_active{false};
 std::atomic<bool> g_overlay{false};
@@ -611,6 +612,19 @@ void render_frame(IDXGISwapChain* swap) {
     arm_xinput();
     Control* c = shm::control();
     if (!c) return;
+    {   // EL renders at guest_res_scale x EM: the world layer and EL menus are downsampled on our side
+        static std::uint32_t pushed_w = 0, pushed_h = 0;
+        const float s = g_res_scale.load();
+        const std::uint32_t gw = static_cast<std::uint32_t>(desc.BufferDesc.Width * s + 0.5f);
+        const std::uint32_t gh = static_cast<std::uint32_t>(desc.BufferDesc.Height * s + 0.5f);
+        if (gw != pushed_w || gh != pushed_h) {
+            pushed_w = gw;
+            pushed_h = gh;
+            c->guest_res_w.store(gw);
+            c->guest_res_h.store(gh);
+            log::info(L"guest frame target %ux%u (EM %ux%u x %.4g)", gw, gh, desc.BufferDesc.Width, desc.BufferDesc.Height, s);
+        }
+    }
     const bool focused = GetForegroundWindow() == g_r.hwnd;
     poll_input(c, focused);
     const Ctx ctx = host_ctx(c);
@@ -713,6 +727,10 @@ HRESULT STDMETHODCALLTYPE on_resize(IDXGISwapChain* swap, UINT n, UINT w, UINT h
 } // namespace
 
 Toggles& toggles() { return g_toggles; }
+
+void set_guest_res_scale(float s) {
+    if (s > 0.05f && s < 16.0f) g_res_scale.store(s);
+}
 
 std::vector<EquipPayload> take_equip_commands() {
     std::scoped_lock lk(g_equip_mutex);
