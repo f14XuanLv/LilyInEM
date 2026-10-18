@@ -72,11 +72,46 @@
 - [ ] 抠像仍是阈值法（`h_render.cpp` 的 `kKeyHlsl`），深色像素可能被抠掉。可以改成双背景求 alpha。
 - [ ] 色彩：EM 色调映射会让莉莉偏灰（`Toggles.quad_gain` 已预留，没有逆色调映射）。
 - [ ] 世界层通道不可用时的 Present 兜底合成没有实现（v3 只保留了世界层主通道）。
-- [ ] LilyMenu 全屏透传时，EL 画面里的位置和 EM 世界不对齐；标题显示的是 EL 休息点名。
+- [ ] **休息点的莉莉 / 英灵画面不准确（待专项完善）**（2026-10-18 实测记录）：
+  - 世界层仍是单帧亮度抠像（`kKeyHlsl` `keyed()`：四邻最小亮度 `smoothstep(0.03, 0.09)` 判实心，其余 alpha = 峰值通道并除 alpha 还原颜色）。EL 英灵（如 s5000 黑骑士）大面积暗色铠甲低于阈值 → 在 EM 里出现**镂空**；把阈值降到 `0.002–0.012`（EL 摄影棚背景实测恰为 0）能补上实心，但淡发光 / 半透明边缘被判成实心 → 出现**外围阴影 / 暗晕**（已回退）。
+  - EL 摄影棚背景像素实测为精确 0；EL 后缓冲是 A2B10G10R10，alpha 被写成不透明，**不能直接用 alpha**。
+  - 双背景求 alpha（EL 每帧交替黑 / 白：`PlayerCameraManager::SetManualCameraFade(1, white)` 画在 UI 之下、场景之上）对 UI 数学上精确，但 Guest 的逐帧标记与帧内容不能稳定对齐（游戏线程 post-tick 置标记 vs 渲染线程 Present 读取），同色两帧相邻即整屏白闪；用帧角落判黑白又会被底部页脚 / 全屏菜单遮挡误判。已整体撤掉，现为单帧合成（无闪烁）。
+  - camera fade 会把整个场景（含莉莉）刷白，所以它只能给 UI 求 alpha；要给角色 / 英灵求精确 alpha，需要只在**背景**后放一块纯白无光照板（或 SceneCapture / 每帧可靠的内容标记），并保证同一 Present 里的黑白配对。
+  - 休息期间 EL 相机 `WorldSpaceLocationOffset.Y = -280`，莉莉与英灵位于画面右侧（UV≈0.47–0.97），`FrameKind::Split` 的世界矩形 = 莉莉脚底左 330 / 右 540 / 上 430 / 下 40 UU；英灵位置取自 EL 休息点 `SpiritLocation_1..3`（-170 / +170 / +340 UU，播 `rest` 动画 track 9）。
+  - 全屏子菜单（技能 / 遗物 / 强化）与 Esc 菜单按 EL 原样**不透明**显示（`FrameKind::Menu`，EM 世界被遮住，莉莉在世界层停在最后一帧）。
+
+- [ ] **EL 休息菜单左侧黑色背景：当前是自定数值，不是 EL 原值**（2026-10-18）
+  - 现状：Guest 把 EL 的 `BG` 控件 Collapsed（它在 EL 帧里是“黑叠黑”，无法从单帧取 alpha），Host `ps_menu` 在 Split 模式下自己画一个面板：`alpha = 0.85 * smoothstep(0.46, 0.28, u)`（u = 屏幕横向 0..1，即左侧约 28% 不透明度 0.85，到约 46% 渐隐为 0）。**0.85 / 0.28 / 0.46 都是目测设定**，没有对照 EL 原画面校准。
+  - 已探索（CUE4Parse，未落地到代码）：EL `WBP_RestMenu` 的 `BG` 是 `Image`，Brush = PaperSprite `T_Menu_RestPointTitle_Bg`（Atlas-Game 图集，源区域 800×8，`DrawAs = Box`，Margin 上下 0.25），所在 `CanvasPanelSlot_4`：Anchors 左边缘竖向拉满（Min (0,0) / Max (0,1)），Offsets Right = 800、`bAutoSize`。即“贴左边、全屏高、设计宽 800 px 的横向贴图条”。
+  - 未探索：该贴图条的逐像素 alpha 渐变曲线、EL UI 的 DPI 缩放（设计分辨率 → 1280×720 时 800 px 对应的屏幕比例）、`Show` / `HideUI` 动画对 BG 透明度的影响。
+  - 后续可选做法：① 按上述贴图 + 锚点 + DPI 精确复刻渐变（读出图集 800×8 区域的 alpha 曲线）；② 让 EL 的 `BG` 保持可见，用“背景板 + 双背景”求得真实 alpha（见上一条的画面专项）。
 
 ### 菜单 / 系统
-- [ ] EL 休息菜单在 EM 长椅场景下的“休眠菜单”（跪坐时 EL 菜单隐藏，选装配时才唤醒）没有实现：目前长椅时只播放跪坐动画，F5 / 重定向会重新打开一个 EL 休息菜单。
-- [ ] ~~打开 EL 菜单依赖休息点~~（2026-10-18 已缓解）：直开菜单走 `spawn_menu`（`WidgetBlueprintLibrary::Create` → `DefaultPageIndex` → `AddToViewport`），不再需要休息点；只有 `MenuKind::Rest`（F5 / debug `menu`）仍依赖地图里的 `BP_Interactable_RestingPoint_C`。
+- [x] （2026-10-18）**EM 长椅 → EL 休息菜单**
+  - EM 长椅菜单在莉莉模式下保持存在但不可见：它在 `WBP_Event` 里，开场动画驱动 RenderOpacity，所以用 `Hidden` 可见性并每帧重设；自身按钮全部拦截；`CloseMenu` 的 HideAnim 在 Hidden 下不 Tick，改为直接 `RemoveFromParent`；它的开场动画导航锁永不释放，打开 EM 地图时 / 长椅结束时调用 `UMGSubsystem::ResetNavigationLocks` 并给 EM 地图 `SetFocus`（否则 EM 快速移动地图无法交互、Esc 无法回退）。
+  - EL 休息菜单直接 `Create + AddToViewport`（不走 EL 坐椅子事件、不依赖 EL 休息点），标题统一为“烟尘之国”，只留 快速移动 / 精灵 / 遗物 / 强化，上下导航在四项间循环；保存 / 离开 / 回想 / 挑战隐藏并拦截（离开 = 取消键）。
+  - 快速移动：EL 菜单休眠（Collapsed）+ EM `WBP_RestMenu::OpenGameMenu(7)`；地图取消 → 唤醒 EL 菜单；选目的地（`OnFastTravelRequested`）→ 两边关闭并执行 EM 传送。EL 菜单取消 → EM `CloseMenu`；EM 菜单 Destruct → EL `CloseMenu(false)`。
+  - 休息时：Lilac 的英灵（`BP_*_RestPoint_C`）每 0.1 s 隐藏一次；EL 当前精灵组的英灵按 EL 休息点 `SpiritLocation_1..3` 站位并播 `rest`；莉莉播 `rest_loop`。
+  - 画面：休息菜单单独打开时为 `FrameKind::Split`（莉莉 / 英灵矩形实时进世界层、动画不冻结，矩形外为菜单）；打开子菜单 / Esc 菜单为 `FrameKind::Menu`（不透明显示，莉莉隐藏、世界层冻结）。
+- [x] （2026-10-18）长椅镜头慢：`EVT_RestPoint` 的 `EventAction_MoveTo_Actor`（AcceptanceRadius 2）要把莱拉克走到长椅中心，木偶的移动组件不 Tick，只能等 EM 的卡住判定超时。现在交互时把莱拉克与莉莉按同一 Y 偏移对齐到长椅（映射不变），休息期间 ctx=EmMenu、木偶不驱动。
+- [x] （2026-10-18）EL Esc 菜单（`WBP_Pause`）只能用 **F5** 打开（Gameplay 上下文，`MenuKind::Pause` → `PC_Base::TryPause`）；EL 自己的入口全部拦截：`InpActEvt_Pause`（菜单里转发的 Esc 曾误开它）、`OnApplicationWillDeactivate`（EL 窗口永远不在前台）、`TriggerOrDeferPause`。
+- [ ] **需求：EL Esc 菜单条目全部保留，世界业务由 EM 接管**。现状：**一项都还没接管**，F5 打开的 `WBP_Pause` 全部按钮仍执行 EL 原生逻辑。按 `WBP_Pause` 实际按钮（CUE4Parse）分类：
+
+  | 按钮 | EL 原生行为 | 判断 | 计划 |
+  |---|---|---|---|
+  | 继续 `Continue` | 关闭菜单、`OnResumeGame` | 不需接管 | 保持 EL 原生（已可用） |
+  | 返回休息点 `BackToRestpoint` | `GameModeZenith::RespawnPlayerPawn`（EL 内传送 + 读图） | **需接管** | EL 世界是空摄影棚，原生执行会打乱锚定；应改为 EM 的“回到最近休息点 / 复活点”流程，或在莉莉模式下禁用 |
+  | 返回标题 `ReturnToTitle` | `WorldLoaderSubsystem::OpenLevelAsset(TitleMap)` | **需接管** | 应触发 EM 返回标题（EL 跟随复位），否则只有 EL 回到标题、桥接断开 |
+  | 退出游戏 `QuitGame` | `KismetSystemLibrary::QuitGame` | **需接管** | 只退出 EL 进程会让 Host 失去 Guest；应改为退出 EM（Job Object 会一并结束 EL） |
+  | 成就 `Achievements` | 打开 EL `WBP_Achievement` | 不需接管（只读） | 可保留；是否改为显示 EM 成就待定 |
+  | 设置 `Settings` | 打开 EL `WBP_Settings` | **部分接管** | 见下 |
+
+  `Settings` 内部细分（按游戏业务判断，未逐页验证 `WBP_Settings` 结构）：
+  - 不需接管：EL 的**键位设置**——莉莉的操作键由 Host 按 EM 键位映射成命令位注入，EL 的键位不参与游戏操作；但 EL 菜单键（Enter/Esc/C/A/D）由 Guest 以固定虚拟键转发，改 EL 的 UI 键位会让转发失效，因此建议**隐藏或锁定**这一页，而不是交给 EM。
+  - 需接管或屏蔽：**画面设置**（分辨率 / 窗口模式 / 帧率等）——EL 是无头 1280×720 导出窗口，改了会破坏帧导出；应隐藏，画面以 EM 为准。
+  - 需同步：**音量**（EL 的 BGM / 环境音已被静音，莉莉的音效仍走 EL 音量）、**语言**（EL 菜单文字）——建议跟随 EM 的设置，而不是两边各自设置。
+  - 待定：伤害数字 / HUD 显示等 EL 游戏性选项（EL HUD 已关闭，大多无效果）。
+- [ ] 直开菜单 `MenuKind::Spirits/Relics/Strengthen` 现仅 debug `menu2/3/4` 使用；`MenuKind::Rest` 已改为直接创建，不再依赖 EL 地图里的 `BP_Interactable_RestingPoint_C`。
 - [ ] `WBP_MainMenu` 的 A/D 翻页按钮可能仍能翻到 Map 页：目前只把 Map 页签设为 Collapsed，`GoToPage` 循环是否跳过未验证；Record / Collection / Tips 页显示的也是 EL 存档内容，与 EM 世界是否冲突待确认。
 - [ ] `SetCanChangeEquipment` 目前开直开菜单时置 true 后没有还原；需要确认关闭菜单后该标记残留是否有副作用（参考 OPMod 的做法）。
 - [ ] EM 档案页（Records）仍显示莱拉克的数据。

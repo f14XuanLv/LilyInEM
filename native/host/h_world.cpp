@@ -1,6 +1,6 @@
 // Host orchestration (game thread, UEngine::Tick PRE: before EM's world and camera tick, FR-MOV-2).
 // Decides the input owner (Ctx), locks Lilac out of her own controls, keeps EM menus that are world services
-// and redirects the ones that belong to the character (Lilac's loadout -> Lily's native menu), and drives
+// and redirects the ones that belong to the character (EM bench menu -> Lily's native rest menu), and drives
 // the puppet / terrain / combat modules and the in-world Lily quad.
 
 #include "host/host.h"
@@ -40,17 +40,27 @@ constexpr const wchar_t* kEmMenus[] = {
     L"WBP_Pause_C", L"WBP_GameMenu_C", L"WBP_RestMenu_C", L"WBP_Shop_C", L"WBP_Settings_C",
     L"WBP_Tutorial_C", L"WBP_Recollection_C", L"WBP_SkillUnlock_C", L"WBP_PassiveUnlock_C",
 };
-// EM bench buttons that open Lilac's loadout -> Lily's menus directly (FR-MENU-EM-2).
-// EM has more loadout categories than Lily: Equipment and Passives both land on EL's relic page.
-constexpr struct Redirect {
-    const wchar_t* handler;
-    MenuKind kind;
-} kRedirected[] = {
-    {L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetSkill_K2Node_ComponentBoundEvent_6_OnPressed__DelegateSignature", MenuKind::Spirits},
-    {L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetEquipment_K2Node_ComponentBoundEvent_7_OnPressed__DelegateSignature", MenuKind::Relics},
-    {L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetPassive_K2Node_ComponentBoundEvent_8_OnPressed__DelegateSignature", MenuKind::Relics},
-    {L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SkillUpgrade_K2Node_ComponentBoundEvent_9_OnPressed__DelegateSignature", MenuKind::Strengthen},
+// EM bench menu (FR-MENU-EM-2): in Lily mode it stays alive but invisible and Lily's native rest menu stands in
+// for it. None of its own entries may fire; fast travel is driven from Lily's menu through OpenGameMenu(7)
+// (what its FastTravel button does), and closing either menu closes the other.
+constexpr const wchar_t* kBenchMenu = L"WBP_RestMenu_C";
+constexpr const wchar_t* kBenchBlocked[] = {
+    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_Exit_K2Node_ComponentBoundEvent_1_OnPressed__DelegateSignature",
+    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_Save_K2Node_ComponentBoundEvent_2_OnPressed__DelegateSignature",
+    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_FastTravelqa_K2Node_ComponentBoundEvent_4_OnPressed__DelegateSignature",
+    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_DifficultyA_K2Node_ComponentBoundEvent_5_OnPressed__DelegateSignature",
+    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_Extra_K2Node_ComponentBoundEvent_0_OnPressed__DelegateSignature",
+    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_Extra_K2Node_ComponentBoundEvent_3_OnPressed__DelegateSignature",
+    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetSkill_K2Node_ComponentBoundEvent_6_OnPressed__DelegateSignature",
+    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetEquipment_K2Node_ComponentBoundEvent_7_OnPressed__DelegateSignature",
+    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SetPassive_K2Node_ComponentBoundEvent_8_OnPressed__DelegateSignature",
+    L"BndEvt__WBP_RestMenu_WBP_RestMenu_Button_SkillUpgrade_K2Node_ComponentBoundEvent_9_OnPressed__DelegateSignature",
+    L"OnPressContext", L"OnPressContextAlt",
 };
+constexpr int kBenchFastTravelPage = 7;
+// EVT_RestPoint walks the player to the bench (EventAction_MoveTo_Actor, AcceptanceRadius 2). The puppet's
+// movement never ticks, so that walk only ends on EM's block detection (seconds); a seated start ends it at once.
+constexpr double kBenchSnapMin = 1.0;
 constexpr const wchar_t* kLilacTabs[] = {L"WBP_GameMenu_Tab_Equipment", L"WBP_GameMenu_Tab_Skills", L"WBP_GameMenu_Tab_Passives"};
 constexpr const wchar_t* kLilacPages[] = {L"WBP_GameMenu_Page_Equipment_C", L"WBP_GameMenu_Page_Skill_C", L"WBP_GameMenu_Page_Passive_C"};
 // FR-HUD-1: Lilac-only parts of WBP_PlayerUI (currency and EXP stay: world services)
@@ -73,11 +83,15 @@ struct State {
     int game_menu_page = 0;
     bool redirecting_page = false;
     std::uint32_t seen_interact = 0;
+    ue::Weak bench_menu;            // the invisible EM bench menu Lily's rest menu stands in for
+    std::int64_t bench_vis = 4;     // its own visibility, restored in Lilac mode
+    int travel = 0;                 // 0 none / 1 EM fast-travel map requested / 2 map on screen
+    bool travel_chosen = false;     // a destination was picked: the bench menu closes, Lily's menu is not woken
     HostFlags flags{};
     HostCounters k{};
-    clock::Every pc_lookup{1.0}, relock{0.25}, hud{1.0}, counters_pub{0.25};
-    RC::Unreal::FName fn_construct{}, fn_destruct{}, fn_page_changed{};
-    std::vector<std::pair<RC::Unreal::FName, MenuKind>> redirected;
+    clock::Every pc_lookup{1.0}, relock{0.25}, hud{1.0}, counters_pub{0.25}, rest_spirits{0.1};
+    RC::Unreal::FName fn_construct{}, fn_destruct{}, fn_page_changed{}, fn_travel_requested{}, fn_close_menu{};
+    std::vector<RC::Unreal::FName> bench_blocked;
     bool names = false;
     double puppet_err_max = 0.0;
 } g;
@@ -205,7 +219,8 @@ void skip_lilac_page(UObject* menu, int index) {
     g.game_menu_page = target;
 }
 
-Ctx compute_ctx(UObject* pc, bool is_bridged, bool in_event, bool lily_event) {
+// An EM bench rest is an event too: the player has no control while EM seats her, exactly like EM itself
+Ctx compute_ctx(UObject* pc, bool is_bridged, bool in_event) {
     if (!is_bridged) return Ctx::Inactive;
     if (render::overlay_open()) return Ctx::Overlay;
     GuestStatus st{};
@@ -213,8 +228,67 @@ Ctx compute_ctx(UObject* pc, bool is_bridged, bool in_event, bool lily_event) {
     std::erase_if(g.em_menus, [](const ue::Weak& w) { return !w.get(); });
     Call paused(ue::gameplay_statics(), L"IsGamePaused");
     const bool em_paused = paused.o(pc).go() && paused.rb() && !g.paused_by_us;
-    if ((in_event && !lily_event) || em_paused || !g.em_menus.empty()) return Ctx::EmMenu;
+    if (in_event || em_paused || !g.em_menus.empty()) return Ctx::EmMenu;
     return Ctx::Gameplay;
+}
+
+// ---- EM bench <-> Lily's rest menu ----
+
+// The bench menu lives inside EVT_RestPoint's WBP_Event, whose open animation drives the menu's render opacity:
+// only Hidden visibility keeps it off screen (re-asserted every tick in case the event touches it)
+constexpr std::int64_t kHidden = 2;
+
+void bench_hide(UObject* menu) {
+    Call vis(menu, L"GetVisibility");
+    if (vis.go() && vis.ri() != kHidden) Call(menu, L"SetVisibility").i(kHidden).go();
+}
+
+void bench_open(UObject* menu) {
+    g.bench_menu.set(menu);
+    g.travel = 0;
+    g.travel_chosen = false;
+    Call vis(menu, L"GetVisibility");
+    g.bench_vis = vis.go() ? vis.ri() : 4;
+    bench_hide(menu);
+    send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Rest}, clock::now_s()));
+    log::info(L"EM bench menu hidden -> Lily's rest menu");
+}
+
+// The hidden bench menu never finishes its show animation (Hidden widgets do not tick), so the UMG navigation lock
+// it takes is never released and EM's fast-travel map would get neither focus nor input
+void unlock_em_navigation() {
+    if (UObject* umg = ue::first(L"UMGSubsystem")) ue::call(umg, L"ResetNavigationLocks");
+}
+
+void focus_game_menu() {
+    unlock_em_navigation();
+    if (UObject* gm = ue::obj(g.bench_menu.get(), L"GameMenu")) ue::call(gm, L"SetFocus");
+}
+
+void bench_travel() {
+    UObject* menu = g.bench_menu.get();
+    if (menu && Call(menu, L"OpenGameMenu").i(kBenchFastTravelPage).go()) {
+        focus_game_menu();
+        g.travel = 1;
+        log::info(L"Lily's fast travel -> EM fast-travel map");
+        return;
+    }
+    send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Rest}, clock::now_s())); // nothing to show: wake Lily's menu again
+}
+
+// The fast-travel map was dismissed without a destination: back to Lily's rest menu
+void bench_tick() {
+    if (UObject* menu = g.bench_menu.get()) bench_hide(menu);
+    if (g.travel == 0) return;
+    const bool map_open = em_menu_open(L"WBP_GameMenu_C");
+    if (g.travel == 1 && map_open) {
+        g.travel = 2;
+        focus_game_menu();
+    }
+    if (g.travel == 2 && !map_open) {
+        g.travel = 0;
+        if (g.bench_menu.get() && !g.travel_chosen) send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Rest}, clock::now_s()));
+    }
 }
 
 void apply_ctx(UObject* pc, Ctx ctx) {
@@ -260,7 +334,15 @@ void interact(UObject* pc, UObject* pawn) {
     }
     if (!best) return;
     const bool bench = ue::class_contains(best, L"RestPoint");
-    if (bench) g.resting = true; // the rest event starts inside OnInteract
+    if (bench) {
+        g.resting = true; // the rest event starts inside OnInteract
+        // seat Lily (both worlds, same offset: the mapping is unchanged) before EM's walk-to-bench starts
+        const double dy = ue::actor_location(best).y - at.y;
+        if (std::abs(dy) > kBenchSnapMin) {
+            puppet_shift(pawn, dy);
+            send_to_guest(Event::make(EventType::Shift, ShiftPayload{dy}, clock::now_s()));
+        }
+    }
     Call(best, L"OnInteract").o(pc).go();
     if (bench) send_to_guest(Event::make(EventType::Restore, LethalPayload{}, clock::now_s())); // FR-MENU-EM-4
     log::info(L"interacted with %s", ue::class_name(best).c_str());
@@ -347,10 +429,23 @@ void drain_guest_events(UObject* pc, UObject* pawn) {
     World* w = shm::world();
     if (!w) return;
     Event e;
-    while (w->to_host.pop(e)) combat_on_event(pc, pawn, e);
+    while (w->to_host.pop(e)) {
+        switch (e.type) {
+        case EventType::RestTravel: bench_travel(); break;
+        case EventType::RestLeave:
+            if (UObject* menu = g.bench_menu.get()) Call(menu, L"CloseMenu").go();
+            break;
+        default: combat_on_event(pc, pawn, e); break;
+        }
+    }
 }
 
 void deactivate(UObject* pc, UObject* pawn) {
+    if (UObject* menu = g.bench_menu.get()) {
+        Call(menu, L"SetVisibility").i(g.bench_vis).go(); // Lilac mode: EM's own bench menu is back
+        send_to_guest(Event::make(EventType::CloseMenu, MenuPayload{}, clock::now_s()));
+        g.bench_menu.reset();
+    }
     if (pawn) {
         lock(pc, pawn, false);
         set_lilac_visible(pawn, true);
@@ -382,7 +477,9 @@ void tick_pre(float) {
         g.fn_construct = ue::fname(L"Construct");
         g.fn_destruct = ue::fname(L"Destruct");
         g.fn_page_changed = ue::fname(L"OnPageChanged");
-        for (const auto& r : kRedirected) g.redirected.emplace_back(ue::fname(r.handler), r.kind);
+        g.fn_travel_requested = ue::fname(L"OnFastTravelRequested");
+        g.fn_close_menu = ue::fname(L"CloseMenu");
+        for (const wchar_t* h : kBenchBlocked) g.bench_blocked.push_back(ue::fname(h));
         g.names = true;
     }
     c->host_pid.store(GetCurrentProcessId());
@@ -393,7 +490,7 @@ void tick_pre(float) {
     g.flags.show_lilac = tg.show_lilac.load() ? 1u : 0u;
     g.flags.debug_hud = tg.debug_hud.load() ? 1u : 0u;
     g.flags.quad_gain = tg.quad_gain.load();
-    for (int n = tg.menu_requests.exchange(0); n > 0; --n) send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{}, now));
+    for (int n = tg.pause_requests.exchange(0); n > 0; --n) send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Pause}, now));
     for (const EquipPayload& e : render::take_equip_commands()) send_to_guest(Event::make(EventType::Equip, e, now));
 
     UObject* pc = g.pc.get();
@@ -432,7 +529,7 @@ void tick_pre(float) {
     }
     if (!is_bridged && g.active) deactivate(pc, pawn);
 
-    const Ctx ctx = compute_ctx(pc, is_bridged, in_event, lily_event);
+    const Ctx ctx = compute_ctx(pc, is_bridged, in_event);
     apply_ctx(pc, ctx);
     g.flags.ready = 1;
     g.flags.rest_pose = (g.active && g.resting) ? 1u : 0u;
@@ -445,13 +542,16 @@ void tick_pre(float) {
         if (g.hud.due(now) || !g.hud_hidden) hide_lilac_hud(pc, lily_shown);
 
         terrain_tick(pc, pawn);
-        const PuppetOut po = puppet_tick(pawn, ctx == Ctx::Gameplay && (!in_event || lily_event));
+        const PuppetOut po = puppet_tick(pawn, ctx == Ctx::Gameplay);
         if (po.placed) {
             ++g.k.puppet_frames;
             g.puppet_err_max = std::max(g.puppet_err_max, po.err);
             g.k.puppet_err_max = g.puppet_err_max;
         }
         drain_guest_events(pc, pawn);
+        bench_tick();
+        // EVT_RestPoint gathers Lilac's spirits around the bench (BP_*_RestPoint_C); Lily's own spirits rest in EL
+        if (g.resting && !g.flags.show_lilac && g.rest_spirits.due(now)) sweep_spirits(true);
 
         InputFrame in{};
         if (c->input.read(in)) {
@@ -465,7 +565,8 @@ void tick_pre(float) {
         }
     }
     combat_tick(pc, pawn, g.active);
-    update_world_layer(pawn, ue::actor_location(pawn), lily_shown && ctx != Ctx::LilyMenu);
+    // stays on under Lily's menus: the render thread freezes the layer on menu frames (Lily kneels behind the menu)
+    update_world_layer(pawn, ue::actor_location(pawn), lily_shown);
     c->host_flags.store(g.flags);
     if (g.counters_pub.due(now)) c->host_counters.store(g.k);
 }
@@ -479,13 +580,19 @@ void on_begin_play(UObject* actor) {
 bool on_process_event_pre(UObject* ctx, ue::UFunction* fn, void*) {
     if (!g.names || !g.locked || !ctx || !fn) return false;
     const RC::Unreal::FName n = fn->GetNamePrivate();
-    for (const auto& r : g.redirected) {
-        if (n != r.first) continue;
-        send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{r.second}, clock::now_s()));
-        log::info(L"EM loadout button -> Lily's menu (kind=%d)", static_cast<int>(r.second));
+    if (n == g.fn_travel_requested && ctx == g.bench_menu.get()) {
+        g.travel_chosen = true; // EM closes its map and the bench menu, then runs the fast travel
+        return false;
+    }
+    // CloseMenu plays HideAnim and removes the menu when it finishes, but a Hidden widget never ticks its
+    // animations: remove it directly (what the animation's OnFinish does), so the rest event continues
+    if (n == g.fn_close_menu && ctx == g.bench_menu.get()) {
+        Call(ctx, L"RemoveFromParent").go();
         return true;
     }
-    return false;
+    if (std::ranges::find(g.bench_blocked, n) == g.bench_blocked.end() || !g.bench_menu.get() || ue::class_name(ctx) != kBenchMenu) return false;
+    log::info(L"blocked EM bench entry %s", fn->GetName().c_str());
+    return true;
 }
 
 void on_process_event_post(UObject* ctx, ue::UFunction* fn, void* parms) {
@@ -502,8 +609,14 @@ void on_process_event_post(UObject* ctx, ue::UFunction* fn, void* parms) {
                 }
                 g.game_menu_page = static_cast<int>(ue::num(ctx, L"InitialPageIndex"));
             }
+            if (cls == kBenchMenu && g.locked && g.active) bench_open(ctx);
         } else {
             std::erase_if(g.em_menus, [&](const ue::Weak& w) { return w.get() == ctx || !w.get(); });
+            if (ctx == g.bench_menu.get()) {
+                g.bench_menu.reset();
+                unlock_em_navigation(); // its show-animation lock never ran out
+                send_to_guest(Event::make(EventType::CloseMenu, MenuPayload{}, clock::now_s()));
+            }
         }
         return;
     }
@@ -516,9 +629,9 @@ std::string status() {
     if (c) c->guest_status.read(gs);
     char buf[900];
     std::snprintf(buf, sizeof(buf),
-                  "active=%d locked=%d ctx=%d guestReady=%u guestMenu=%u resting=%d rebase=%u mapped=%d puppetFrames=%u puppetErrMax=%.4f %s "
+                  "active=%d locked=%d ctx=%d guestReady=%u guestMenu=%u resting=%d bench=%d travel=%d rebase=%u mapped=%d puppetFrames=%u puppetErrMax=%.4f %s "
                   "dmgIntercepted=%u kbIntercepted=%u hpCorrections=%u hitsApplied=%u enemyDamage=%u quad=%d rt=%d",
-                  g.active, g.locked, static_cast<int>(g.ctx), gs.ready, gs.menu_open, g.resting, puppet_rebase_seq(), puppet_mapping_ready(), g.k.puppet_frames,
+                  g.active, g.locked, static_cast<int>(g.ctx), gs.ready, gs.menu_open, g.resting, g.bench_menu ? 1 : 0, g.travel, puppet_rebase_seq(), puppet_mapping_ready(), g.k.puppet_frames,
                   g.k.puppet_err_max, terrain_status().c_str(), g.k.dmg_intercepted, g.k.kb_intercepted, g.k.lilac_hp_corrections, g.k.hit_events_applied,
                   g.k.enemy_damage_calls, g.quad ? 1 : 0, render::world_rt_captured() ? 1 : 0);
     return buf;

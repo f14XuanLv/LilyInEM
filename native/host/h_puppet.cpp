@@ -122,6 +122,14 @@ PuppetOut puppet_tick(UObject* pawn, bool drive) {
     return out;
 }
 
+void puppet_shift(UObject* pawn, double dy) {
+    if (!pawn) return;
+    V3 l = ue::actor_location(pawn);
+    l.y += dy;
+    ue::set_actor_location(pawn, l, false, true);
+    if (g.have_placed) g.placed = ue::actor_location(pawn); // our own move, not an external one
+}
+
 void puppet_reset() {
     g.mapped = false;
     g.have_placed = false;

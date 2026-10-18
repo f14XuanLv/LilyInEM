@@ -28,6 +28,7 @@ struct PuppetOut {
 void puppet_request_rebase(UObject* pawn, const char* why);
 bool puppet_mapping_ready();             // Guest answered the current rebase
 PuppetOut puppet_tick(UObject* pawn, bool drive);
+void puppet_shift(UObject* pawn, double dy);   // move Lilac along Y without triggering a rebase
 void puppet_reset();
 std::uint32_t puppet_rebase_seq();
 
@@ -70,7 +71,7 @@ struct Toggles {
     std::atomic<bool> show_lilac{false};
     std::atomic<bool> debug_hud{false};
     std::atomic<float> quad_gain{1.0f};
-    std::atomic<int> menu_requests{0};
+    std::atomic<int> pause_requests{0}; // F5: EL's Esc menu
 };
 Toggles& toggles();
 std::vector<EquipPayload> take_equip_commands();

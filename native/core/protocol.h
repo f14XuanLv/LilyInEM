@@ -114,6 +114,15 @@ struct Vitals {                     // G
     char anim[32]{};
 };
 
+// EL menus: every frame is composited on its own (h_render ps_menu). EL's back buffer alpha cannot be used
+// (A2B10G10R10, written opaque); alternating black / white studios (two-background matting) flickered because
+// EL's per-frame flag is not reliably aligned with the frame content.
+enum class FrameKind : std::uint32_t {
+    World = 0, // no EL menu: the whole frame is the world layer
+    Menu = 1,  // full-screen EL menu, Lily hidden: menu overlay only, the world layer keeps its last frame
+    Split = 2, // rest menu: the rect around Lily and her resting spirits is the world layer, the rest is the menu
+};
+
 struct FrameMeta {                  // G, published from Present
     std::uint64_t shared_handle = 0;
     std::uint32_t width = 0, height = 0;
@@ -121,6 +130,8 @@ struct FrameMeta {                  // G, published from Present
     float view_w_uu = 0.0f, view_h_uu = 0.0f; // world extent of the frame at Lily's depth
     std::uint64_t frame_ms = 0;
     std::uint64_t frame_seq = 0;
+    std::uint32_t menu_frame = 0;   // FrameKind: what the Host takes from this frame
+    float split[4]{};               // FrameKind::Split: world rect (u0, v0, u1, v1) in frame UV
 };
 
 struct GuestStatus {                // G
@@ -216,9 +227,17 @@ enum class EventType : std::uint32_t {
     Restore = 2,    // EM bench / respawn: FullyRestore Lily
     OpenMenu = 3,   // open a Lily menu (MenuKind selects which)
     Equip = 4,      // loadout command from the overlay panel
+    CloseMenu = 5,  // the EM bench menu ended: close Lily's rest menu
+    Shift = 6,      // move Lily along Y (ShiftPayload): snap to the EM bench seat
     // G -> H
     HitEnemy = 100, // EL hitbox hit an EM-enemy proxy: EM settles it natively
     Lethal = 101,   // Lily would die: EM runs its own death / respawn flow
+    RestTravel = 102, // Lily's rest menu "fast travel": open EM's fast-travel map
+    RestLeave = 103,  // Lily's rest menu was closed by the player: close the EM bench menu
+};
+
+struct ShiftPayload {
+    double dy = 0.0;
 };
 
 struct HurtPayload {
@@ -230,10 +249,11 @@ struct HurtPayload {
 };
 
 enum class MenuKind : std::uint32_t {
-    Rest = 1,        // native rest point: full sit-down event (F5 / debug "menu")
+    Rest = 1,        // native rest menu shown at an EM bench (wakes a dormant one)
     Spirits = 2,     // WBP_MainMenu page 1 (Page_Equipment): spirit loadout
     Relics = 3,      // WBP_MainMenu page 2 (Page_Passive): relic loadout
     Strengthen = 4,  // WBP_Strengthen: spirit strengthening
+    Pause = 5,       // EL's Esc menu (WBP_Pause via PC_Base::TryPause), F5 only: EL's own entries are blocked
 };
 struct MenuPayload {
     MenuKind kind = MenuKind::Rest;

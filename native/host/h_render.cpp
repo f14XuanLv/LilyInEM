@@ -3,7 +3,7 @@
 //   (WndProc subclass + XInputGetState detour; the mod reads the pad through the trampoline)
 // - world layer (FR-CMP-1): the EL frame is keyed into our render target, which EM samples through
 //   MI_Spine_Character on a quad attached to Lilac (same sort layer as Lilac, under EM UI / fades / foreground)
-// - LilyMenu: EL's native menu is shown full-screen over the dimmed EM world
+// - LilyMenu: EL's native menu (Lily hidden in that frame) is keyed over the EM world
 // - ImGui: F6 loadout panel, Lily HUD, F10 oracle panel, toasts
 
 #include "host/host.h"
@@ -44,12 +44,14 @@ namespace {
 constexpr const char* kKeyHlsl = R"hlsl(
 Texture2D frame : register(t0);
 SamplerState samp : register(s0);
-cbuffer Key : register(b0) { float2 texel; float gain; float out_linear; float menu; float3 pad; };
+cbuffer Key : register(b0) { float2 texel; float gain; float out_linear; float split_on; float3 pad; float4 split; };
+bool in_split(float2 uv) { return split_on > 0.5 && all(uv >= split.xy) && all(uv <= split.zw); }
 float peak(float3 c) { return max(c.r, max(c.g, c.b)); }
+float3 px(float2 uv) { return frame.Sample(samp, uv).rgb; }
 float4 keyed(float2 uv) {
-    float3 c = frame.Sample(samp, uv).rgb;
-    float n = min(min(peak(frame.Sample(samp, uv + float2(texel.x, 0)).rgb), peak(frame.Sample(samp, uv - float2(texel.x, 0)).rgb)),
-                  min(peak(frame.Sample(samp, uv + float2(0, texel.y)).rgb), peak(frame.Sample(samp, uv - float2(0, texel.y)).rgb)));
+    float3 c = px(uv);
+    float n = min(min(peak(px(uv + float2(texel.x, 0))), peak(px(uv - float2(texel.x, 0)))),
+                  min(peak(px(uv + float2(0, texel.y))), peak(px(uv - float2(0, texel.y)))));
     float solid = smoothstep(0.03, 0.09, n);
     float a = saturate(max(solid, peak(c)));
     float3 s = a > 1e-4 ? saturate(c / a) : float3(0, 0, 0);
@@ -63,20 +65,32 @@ VSOut vs_main(uint id : SV_VertexID) {
     return o;
 }
 float4 ps_world(VSOut i) : SV_Target {
+    if (split_on > 0.5 && !in_split(i.uv)) return float4(0, 0, 0, 0); // Split: only the rect around Lily is world
     float4 k = keyed(i.uv);
     float3 c = saturate(k.rgb * gain);
     if (out_linear > 0.5) c = pow(c, 2.2);
     return float4(c, k.a);
 }
+// EL menus over EM, blended ONE / INV_SRC_ALPHA. Every frame is composited on its own (no per-frame state, so
+// nothing can flicker). Over the black studio the frame is the premultiplied UI; only its alpha is unknown.
+// - full-screen menus (Menu): shown exactly as EL draws them, opaque (their own backdrop covers the screen)
+// - rest menu (Split): EL's backdrop is a black panel over the left third that fades out to the right; it is
+//   black on black in the frame, so the panel is restored here and the rest (footer, cursor) is keyed
 float4 ps_menu(VSOut i) : SV_Target {
+    if (in_split(i.uv)) discard;
     float3 c = frame.Sample(samp, i.uv).rgb;
-    return float4(c, clamp(0.8 + peak(c) * 0.6, 0.8, 1.0)); // black studio becomes a dimmer over EM
+    if (split_on < 0.5) return float4(c, 1.0);
+    float panel = 0.85 * smoothstep(0.46, 0.28, i.uv.x);
+    float key = saturate(max(smoothstep(0.03, 0.09, peak(c)), peak(c)));
+    float a = max(panel, key);
+    return float4(min(c, a), a);
 }
 )hlsl";
 
 struct alignas(16) KeyCB {
     float texel_x, texel_y, gain, out_linear;
-    float menu, pad0, pad1, pad2;
+    float split_on, pad0, pad1, pad2;
+    float split[4];
 };
 
 using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
@@ -225,7 +239,7 @@ bool init(IDXGISwapChain* swap) {
     D3D11_BLEND_DESC bl{};
     auto& rt = bl.RenderTarget[0];
     rt.BlendEnable = TRUE;
-    rt.SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    rt.SrcBlend = D3D11_BLEND_ONE; // ps_menu outputs premultiplied colour (the frame over the black studio)
     rt.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
     rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
     rt.SrcBlendAlpha = D3D11_BLEND_ONE;
@@ -385,10 +399,7 @@ void poll_input(Control* c, bool focused) {
     static bool f5 = false, f6 = false, f7 = false, f8 = false, f10 = false, esc = false;
     const Ctx ctx = host_ctx(c);
     if (focused) {
-        if (edge(VK_F5, f5) && ctx != Ctx::Inactive) {
-            ++g_toggles.menu_requests;
-            g_overlay = false;
-        }
+        if (edge(VK_F5, f5) && ctx == Ctx::Gameplay) ++g_toggles.pause_requests;
         if (edge(VK_F6, f6) && (ctx == Ctx::Gameplay || g_overlay.load())) g_overlay = !g_overlay.load();
         if (edge(VK_F7, f7)) g_toggles.bridge_on = !g_toggles.bridge_on.load();
         if (edge(VK_F8, f8)) g_toggles.show_lilac = !g_toggles.show_lilac.load();
@@ -440,11 +451,6 @@ void draw_panel(const Vitals& v, const ImVec2& display) {
         if (ImGui::Button("解锁全部并回满 Unlock all & restore")) queue_equip(EquipOp::UnlockAll, 1, 0, "");
         ImGui::SameLine();
         if (ImGui::Button("切换精灵组 Switch set")) queue_equip(EquipOp::SwitchSet, v.summon_set == 1 ? 2 : 1, 0, "");
-        ImGui::SameLine();
-        if (ImGui::Button("莉莉原生菜单 Native menu (F5)")) {
-            ++g_toggles.menu_requests;
-            open = false;
-        }
         ImGui::Separator();
         ImGui::Columns(2, "cols", true);
         for (int set = 1; set <= 2; ++set) {
@@ -561,11 +567,25 @@ void render_frame(IDXGISwapChain* swap) {
         cb.texel_x = 1.0f / static_cast<float>(g_r.gw);
         cb.texel_y = 1.0f / static_cast<float>(g_r.gh);
         cb.gain = g_toggles.quad_gain.load() > 0.05f ? g_toggles.quad_gain.load() : 1.0f;
-        if (g_world_active && g_r.ps_world && ensure_world_rtv()) {
+        // FrameKind::Menu has Lily hidden: the world layer keeps its last Lily and the menu goes on top. Split keeps
+        // her live (the rect around her feeds the world layer, the rest is the menu). After a Menu frame the world
+        // layer waits one more frame, in case EL's content trails its flag (no empty Lily).
+        const auto kind = static_cast<FrameKind>(fm.menu_frame);
+        static std::uint64_t last_seq = 0;
+        static int since_menu = 2;
+        if (fm.frame_seq != last_seq) {
+            last_seq = fm.frame_seq;
+            since_menu = kind == FrameKind::Menu ? 0 : std::min(since_menu + 1, 2);
+        }
+        if (kind == FrameKind::Split) {
+            cb.split_on = 1.0f;
+            std::memcpy(cb.split, fm.split, sizeof(cb.split));
+        }
+        if (g_world_active && since_menu >= 2 && g_r.ps_world && ensure_world_rtv()) {
             cb.out_linear = g_r.world_linear ? 1.0f : 0.0f;
             blit(g_r.world_rtv, facts::kWorldRtWidth, facts::kWorldRtHeight, g_r.ps_world, srv, cb, false);
         }
-        if (ctx == Ctx::LilyMenu && g_r.ps_menu) blit(g_r.back_rtv, desc.BufferDesc.Width, desc.BufferDesc.Height, g_r.ps_menu, srv, cb, true);
+        if (kind != FrameKind::World && g_r.ps_menu) blit(g_r.back_rtv, desc.BufferDesc.Width, desc.BufferDesc.Height, g_r.ps_menu, srv, cb, true);
     }
 
     ImGui::SetCurrentContext(g_r.imgui);

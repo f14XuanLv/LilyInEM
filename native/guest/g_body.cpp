@@ -18,6 +18,7 @@
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/UObject.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -37,13 +38,45 @@ constexpr const wchar_t* kMenuClasses[] = {
     L"WBP_RestMenu_C", L"WBP_EquipmentMenu_C", L"WBP_PassiveMenu_C", L"WBP_Strengthen_C", L"WBP_MainMenu_C", L"WBP_Pause_C",
     L"WBP_FastTravel_C", L"WBP_ChallengeMenu_C", L"WBP_RecollectionMenu_C", L"WBP_DialogYesNo_C", L"WBP_DialogOK_C", L"WBP_DialogTutorial_C",
 };
-// EL world-business entries in the rest menu: EM owns maps / travel / challenges / recollection (FR-MENU-EL-2)
-constexpr const wchar_t* kHiddenRestButtons[] = {L"RestButton_Map", L"RestButton_Map_dummy", L"RestButton_Challenge", L"RestButton_Recollection"};
+// The rest menu keeps its first four entries (fast travel / spirits / relics / strengthen, FR-MENU-EL-2);
+// save / leave / recollection / challenge are EM world business (leaving = cancel)
+constexpr const wchar_t* kHiddenRestWidgets[] = {
+    L"RestButton_Save", L"RestButton_Leave", L"RestButton_Recollection", L"RestButton_Challenge", L"HorizontalBox_Challenge", L"NewRecollectionIcon",
+    L"BG", // full-screen dimmer meant for EL's own world: the EM world behind stays as it is
+};
 constexpr const wchar_t* kBlockedHandlers[] = {
-    L"BndEvt__RestButton_Map_K2Node_ComponentBoundEvent_0_OnClicked__DelegateSignature",
     L"BndEvt__WBP_RestMenu_RestButton_Challenge_K2Node_ComponentBoundEvent_4_OnClicked__DelegateSignature",
     L"BndEvt__WBP_RestMenu_RestButton_Recollection_K2Node_ComponentBoundEvent_1_OnClicked__DelegateSignature",
+    L"BndEvt__RestButton_Save_K2Node_ComponentBoundEvent_2_OnClicked__DelegateSignature",
+    L"BndEvt__RestButton_Leave_K2Node_ComponentBoundEvent_8_OnClicked__DelegateSignature",
+    // EL's Esc menu only opens on F5 (MenuKind::Pause -> PC_Base::TryPause). PC_Base's own entries: the Pause input
+    // action (a forwarded Esc in any EL menu would open it), losing window focus (EL never has it) and the deferred
+    // pause after a map load.
+    L"InpActEvt_Pause_K2Node_InputActionEvent_4",
+    L"OnApplicationWillDeactivate",
+    L"TriggerOrDeferPause",
 };
+// Fast travel is EM's: the entry stays (always enabled) and opens EM's fast-travel map instead of EL's
+constexpr const wchar_t* kTravelHandler = L"BndEvt__RestButton_Map_K2Node_ComponentBoundEvent_0_OnClicked__DelegateSignature";
+constexpr const wchar_t* kRestMenu = L"WBP_RestMenu_C";
+// [SDK] EUINavigation
+constexpr int kNavUp = 2, kNavDown = 3;
+// EL's rest point is never used: its menu is titled with this name instead
+constexpr const wchar_t* kRestTitle = L"\u70DF\u5C18\u4E4B\u56FD"; // 烟尘之国
+
+// EM bench rest (EVT_ACT_CompanionRestStart): the current set's spirits stand at the rest point's
+// SpiritLocation_1..3 [live BP_Interactable_RestingPoint: -170 / +170 / +340 UU from the kneeling spot,
+// on the floor, the first facing right] and loop their "rest" animation on track 9
+constexpr struct {
+    double dy;
+    bool facing_right;
+} kRestSpirits[] = {{-170.0, true}, {170.0, false}, {340.0, false}};
+// [POLICY] while resting the EL camera looks 280 UU left of Lily, so she and her spirits sit in the right part of
+// the frame (UV ~0.47..0.97) and never meet the rest menu on the left (UV < 0.43). The world layer follows
+// her projected foot, so the shift is invisible in EM.
+constexpr double kRestCameraY = -280.0;
+// world rect around the kneeling Lily and her spirits (UU from her foot) for FrameKind::Split
+constexpr double kSplitLeft = 330.0, kSplitRight = 540.0, kSplitUp = 430.0, kSplitDown = 40.0;
 
 // [POLICY] recenter before Lily leaves 40 % of the enlarged camera clamp volume (500000 UU, g_stage.cpp)
 constexpr double kRecenterRadius = 200000.0;
@@ -52,7 +85,7 @@ constexpr double kRecenterRadius = 200000.0;
 constexpr double kStudioLift = 60000.0;
 
 struct State {
-    ue::Weak pc, pawn, rest_point;
+    ue::Weak pc, pawn;
     UObject* armed_pawn = nullptr;
     UObject* anchored_pawn = nullptr;
     bool anchored = false, held = false, paused = false, rest_pose = false, in_title = false;
@@ -64,7 +97,13 @@ struct State {
     clock::Every title_try{1.5}, title_check{0.5}, pc_lookup{1.0}, slow{0.25}, counters_pub{0.25};
     int wake_taps = 0;
     double next_wake = 0.0;
-    RC::Unreal::FName fn_construct{}, fn_destruct{};
+    ue::Weak dormant;               // rest menu hidden while EM's fast-travel map is up
+    std::int64_t dormant_vis = 4;
+    bool closing = false;           // the Host closed the rest menu: no RestLeave echo
+    FrameKind frame_kind = FrameKind::World;
+    ue::Weak camera;
+    float foot_u = 0.5f, foot_v = 0.5f, view_w = 0.0f, view_h = 0.0f; // last projection
+    RC::Unreal::FName fn_construct{}, fn_destruct{}, fn_travel{};
     std::vector<RC::Unreal::FName> blocked;
     bool names = false;
     Vitals vitals{};
@@ -169,6 +208,9 @@ void reset_anchor() {
     g.anchored_pawn = nullptr;
     g.held = false;
     g.menus.clear();
+    g.frame_kind = FrameKind::World;
+    const float none[4]{};
+    stage_menu(FrameKind::World, none);
     g.map = {};
     stage_reset();
     terrain_reset();
@@ -194,33 +236,151 @@ void kneel(UObject* pawn, bool on) {
     ue::call(sa, L"RequestRefreshPlayingAnimation");
 }
 
-void open_rest_menu(UObject* pc, const V3& at) {
-    if (!g.rest_point) g.rest_point.set(ue::first(L"BP_Interactable_RestingPoint_C"));
-    UObject* rp = g.rest_point.get();
-    if (!rp) {
-        log::warn(L"no EL rest point in this map: cannot open Lily's menu");
-        return;
+void set_camera_offset(double y) {
+    if (!g.camera) g.camera.set(ue::first(L"BP_GameplayCamera_C"));
+    UObject* cam = g.camera.get();
+    if (!cam) return;
+    for (const wchar_t* settings : {L"DefaultSettings", L"CurrentSettings"}) {
+        ue::FProperty* sp = ue::prop(cam->GetClassPrivate(), settings);
+        ue::FProperty* off = ue::member_of(sp, L"WorldSpaceLocationOffset");
+        if (sp && off) ue::write_vec(reinterpret_cast<std::uint8_t*>(cam) + sp->GetOffset_Internal() + off->GetOffset_Internal(), off->GetSize(), {0.0, y, 0.0});
     }
-    Call(rp, L"SetActorEnableCollision").b(true).go();
-    ue::set_actor_location(rp, at);
-    if (UObject* ps = ue::obj(rp, L"PlayerStart")) ue::set_actor_location(ps, at); // EVT_ACT_MoveToTarget finishes at once
-    Call(rp, L"OnInteract").o(pc).go();
-    log::info(L"opened Lily's rest menu");
 }
+
+std::vector<UObject*> companions(UObject* pc) {
+    std::vector<UObject*> out;
+    Call list(ue::obj(pc, L"SpiritCompanionComponent"), L"GetOrderedCurrentCompanions");
+    if (!list.go() || !list.ret_prop()) return out;
+    const auto* arr = static_cast<const ue::RawArray*>(list.slot(list.ret_prop()));
+    for (std::int32_t i = 0; arr->data && i < arr->num && out.size() < std::size(kRestSpirits); ++i) {
+        UObject* c = static_cast<UObject**>(arr->data)[i];
+        if (ue::alive(c)) out.push_back(c);
+    }
+    return out;
+}
+
+// The studio keeps the spirit companions hidden; at an EM bench they gather and rest like at an EL rest point
+void rest_spirits(UObject* pc, UObject* pawn, bool on) {
+    const V3 at = ue::actor_location(pawn);
+    const double foot = at.z - ue::num(ue::obj(pawn, L"CapsuleComponent"), L"CapsuleHalfHeight");
+    const std::vector<UObject*> list = companions(pc);
+    for (std::size_t i = 0; i < list.size(); ++i) {
+        UObject* c = list[i];
+        Call(c, L"SetActorHiddenInGame").b(!on).go();
+        if (!on) {
+            ue::call(c, L"ClearIdleAnimationOverride");
+            continue;
+        }
+        if (UObject* mask = ue::obj(c, L"LightEmulatorMask")) Call(mask, L"SetHiddenInGame").b(true).b(true).go(); // dark halo on the studio
+        const double hh = ue::num(ue::obj(c, L"CapsuleComponent"), L"CapsuleHalfHeight");
+        Call(c, L"SetMoveTargetWithTime").o(nullptr).v({at.x, at.y + kRestSpirits[i].dy, foot + hh}).f(0.5).b(true).b(kRestSpirits[i].facing_right).go();
+        Call(c, L"SetIdleAnimationOverride").s(L"rest").go();
+        Call(ue::obj(c, L"SpineAnimationComponent"), L"PlayAnimation").s(L"rest").i(9).b(true).f(0.0).f(0.0).b(false).go();
+    }
+    if (!on) ue::call(ue::obj(pc, L"SpiritCompanionComponent"), L"ResetCurrentSetStateAndLocation");
+}
+
+void rest(UObject* pc, UObject* pawn, bool on) {
+    kneel(pawn, on);
+    rest_spirits(pc, pawn, on);
+    set_camera_offset(on ? kRestCameraY : 0.0);
+}
+
+// Menu-only frames: Lily (and her resting spirits) leave the exported frame
+void hide_rest_actors(UObject* pc, UObject* pawn, bool hidden) {
+    Call(pawn, L"SetActorHiddenInGame").b(hidden).go();
+    if (!g.rest_pose) return;
+    for (UObject* c : companions(pc)) Call(c, L"SetActorHiddenInGame").b(hidden).go();
+}
+
+FrameKind frame_kind(bool menu_open) {
+    if (!menu_open || !host_alive()) return FrameKind::World;
+    int visible = 0;
+    bool rest_only = true;
+    for (const ue::Weak& w : g.menus) {
+        UObject* m = w.get();
+        if (!m || m == g.dormant.get()) continue;
+        ++visible;
+        rest_only = rest_only && ue::class_name(m) == kRestMenu;
+    }
+    return (g.rest_pose && visible == 1 && rest_only) ? FrameKind::Split : FrameKind::Menu;
+}
+
+void publish_frame_kind(UObject* pc, UObject* pawn, FrameKind kind) {
+    if ((kind == FrameKind::Menu) != (g.frame_kind == FrameKind::Menu)) hide_rest_actors(pc, pawn, kind == FrameKind::Menu);
+    g.frame_kind = kind;
+    float split[4]{};
+    if (kind == FrameKind::Split && g.view_w > 1.0f && g.view_h > 1.0f) {
+        split[0] = g.foot_u - static_cast<float>(kSplitLeft) / g.view_w;
+        split[1] = g.foot_v - static_cast<float>(kSplitUp) / g.view_h;
+        split[2] = g.foot_u + static_cast<float>(kSplitRight) / g.view_w;
+        split[3] = g.foot_v + static_cast<float>(kSplitDown) / g.view_h;
+    }
+    stage_menu(kind, split);
+}
+
+UObject* active_child(UObject* menu, const wchar_t* switcher) { return ue::call_obj(ue::obj(menu, switcher), L"GetActiveWidget"); }
 
 void tidy_rest_menu(UObject* menu) {
-    for (const wchar_t* b : kHiddenRestButtons) {
-        if (UObject* btn = ue::obj(menu, b)) Call(btn, L"SetVisibility").i(1 /*Collapsed*/).go();
+    for (const wchar_t* b : kHiddenRestWidgets) {
+        if (UObject* w = ue::obj(menu, b)) Call(w, L"SetVisibility").i(1 /*Collapsed*/).go();
+    }
+    // EL's own fast-travel unlock does not apply: EM decides inside its map
+    Call(ue::obj(menu, L"WidgetSwitcher_RestButton_Map"), L"SetActiveWidgetIndex").i(0).go();
+    // the four entries wrap around instead of navigating into the hidden ones
+    UObject* top = ue::obj(menu, L"RestButton_Map");
+    UObject* bottom = active_child(menu, L"WidgetSwitcher_Strengthen");
+    if (top && bottom) {
+        Call(top, L"SetNavigationRuleExplicit").i(kNavUp).o(bottom).go();
+        Call(bottom, L"SetNavigationRuleExplicit").i(kNavDown).o(top).go();
     }
 }
 
-// The hidden Map button is EL's default focus: give focus to the first remaining entry so forwarded keys navigate
+UObject* rest_menu() {
+    for (const ue::Weak& w : g.menus) {
+        if (ue::class_name(w.get()) == kRestMenu) return w.get();
+    }
+    return nullptr;
+}
+
+// Fast travel: the rest menu sleeps (Lily stays seated) while EM's fast-travel map is on screen
+void rest_sleep(UObject* menu) {
+    Call vis(menu, L"GetVisibility");
+    g.dormant_vis = vis.go() ? vis.ri() : 4;
+    Call(menu, L"SetVisibility").i(1 /*Collapsed*/).go();
+    g.dormant.set(menu);
+    if (World* w = shm::world()) w->to_host.push(Event::make(EventType::RestTravel, MenuPayload{}, clock::now_s()));
+    log::info(L"rest menu asleep: EM fast travel");
+}
+
+bool rest_wake() {
+    UObject* menu = g.dormant.get();
+    if (!menu) return false;
+    g.dormant.reset();
+    Call(menu, L"SetVisibility").i(g.dormant_vis).go();
+    if (UObject* btn = ue::obj(menu, L"RestButton_Map")) ue::call(btn, L"SetFocus");
+    log::info(L"rest menu awake");
+    return true;
+}
+
+bool rest_close() {
+    UObject* menu = rest_menu();
+    if (!menu) return false;
+    g.dormant.reset();
+    g.closing = true;
+    Call(menu, L"CloseMenu").b(false).go(); // RemoveMenu -> RemoveFromParent
+    g.closing = false;
+    log::info(L"rest menu closed by the EM bench");
+    return true;
+}
+
+// The hidden Leave button can be EL's remembered focus: give focus to the first remaining entry so forwarded keys navigate
 void keep_menu_focus() {
     std::erase_if(g.menus, [](const ue::Weak& w) { return !w.get(); });
     if (g.menus.size() != 1) return;
     UObject* menu = g.menus.front().get();
-    if (ue::class_name(menu) != L"WBP_RestMenu_C" || ue::call_bool(menu, L"HasFocusedDescendants")) return;
-    for (const wchar_t* b : {L"RestButton_Equipment", L"RestButton_Equipment_dummy", L"RestButton_Leave"}) {
+    if (menu == g.dormant.get() || ue::class_name(menu) != kRestMenu || ue::call_bool(menu, L"HasFocusedDescendants")) return;
+    for (const wchar_t* b : {L"RestButton_Map", L"RestButton_Equipment", L"RestButton_Equipment_dummy"}) {
         UObject* btn = ue::obj(menu, b);
         if (btn && ue::call_bool(btn, L"IsVisible")) {
             ue::call(btn, L"SetFocus");
@@ -231,11 +391,13 @@ void keep_menu_focus() {
 
 // ---- direct menus ----
 
-// EM bench buttons skip EL's sit-down event entirely and spawn the target menu straight into the
-// viewport. This mirrors the native rest-menu button handlers (WBP_RestMenu ubergraph):
+// Lily's menus skip EL's sit-down event entirely (Lily already kneels on the EM bench) and are spawned
+// straight into the viewport. This mirrors the native rest-menu button handlers (WBP_RestMenu ubergraph):
 // SetCanChangeEquipment -> Create -> SetIntPropertyByName(DefaultPageIndex) -> AddToViewport(10).
 // DefaultPageIndex is ExposeOnSpawn and read by WBP_MainMenu::Construct, so it must be written
-// between Create and AddToViewport.
+// between Create and AddToViewport. WBP_RestMenu itself needs nothing from the event (no EventContext);
+// its Construct only titles it with EL's map name, which is replaced by the EM bench's name.
+constexpr const wchar_t* kRestMenuClass = L"/Game/_Zenith/UI/Rest/WBP_RestMenu.WBP_RestMenu_C";
 constexpr const wchar_t* kMainMenuClass = L"/Game/_Zenith/UI/MainMenu/WBP_MainMenu.WBP_MainMenu_C";
 constexpr const wchar_t* kStrengthenClass = L"/Game/_Zenith/UI/Strengthen/WBP_Strengthen.WBP_Strengthen_C";
 
@@ -257,12 +419,33 @@ UObject* spawn_menu(UObject* pc, const wchar_t* class_path, int page) {
     return w;
 }
 
-void open_menu(UObject* pc, const V3& at, MenuKind kind) {
+void set_rest_title(UObject* menu, const wchar_t* title) {
+    Call conv(ue::find(L"/Script/Engine.Default__KismetTextLibrary"), L"Conv_StringToText");
+    if (conv.s(title).go()) Call(ue::obj(menu, L"RestPointName"), L"SetText").copy(conv.slot(conv.ret_prop())).go();
+}
+
+void open_rest_menu(UObject* pc) {
+    if (rest_wake() || rest_menu()) return;
+    UObject* menu = spawn_menu(pc, kRestMenuClass, -1);
+    if (!menu) {
+        log::warn(L"failed to open Lily's rest menu");
+        return;
+    }
+    set_rest_title(menu, kRestTitle);
+    log::info(L"opened Lily's rest menu");
+}
+
+void open_menu(UObject* pc, MenuKind kind) {
     if (kind == MenuKind::Rest) {
-        open_rest_menu(pc, at);
+        open_rest_menu(pc);
         return;
     }
     if (!g.menus.empty()) return; // never stack a second EL menu
+    if (kind == MenuKind::Pause) {
+        ue::call(pc, L"TryPause"); // native path: CanOpenMenu -> WBP_Pause -> input action set 2
+        log::info(L"opened Lily's Esc menu");
+        return;
+    }
     // same unlock the rest menu applies before opening its loadout pages (also the OPMod's toggle)
     if (UObject* se = ue::obj(pc, L"SpiritEquipComponent")) Call(se, L"SetCanChangeEquipment").b(true).go();
     const wchar_t* cls = nullptr;
@@ -350,7 +533,7 @@ void apply_equip(UObject* pc, UObject* pawn, const EquipPayload& e) {
 
 // ---- Host events ----
 
-void drain_events(UObject* pc, UObject* pawn, const V3& loc) {
+void drain_events(UObject* pc, UObject* pawn, V3& loc) {
     World* w = shm::world();
     if (!w) return;
     Event e;
@@ -358,8 +541,14 @@ void drain_events(UObject* pc, UObject* pawn, const V3& loc) {
         switch (e.type) {
         case EventType::Hurt: combat_on_hurt(pawn, e.as<HurtPayload>()); break;
         case EventType::Restore: full_restore(pc, pawn); break;
-        case EventType::OpenMenu: open_menu(pc, loc, e.as<MenuPayload>().kind); break;
+        case EventType::OpenMenu: open_menu(pc, e.as<MenuPayload>().kind); break;
         case EventType::Equip: apply_equip(pc, pawn, e.as<EquipPayload>()); break;
+        case EventType::CloseMenu: rest_close(); break;
+        case EventType::Shift: // same offset as the puppet: the mapping stays valid
+            loc.y += e.as<ShiftPayload>().dy;
+            ue::set_actor_location(pawn, loc);
+            if (UObject* sc = ue::obj(pc, L"SpiritCompanionComponent")) ue::call(sc, L"ResetCurrentSetStateAndLocation");
+            break;
         default: break;
         }
     }
@@ -381,7 +570,11 @@ void publish_projection(UObject* pc, const V3& foot) {
     const auto s = proj::project({foot.x, foot.y, foot.z}, {cam.x, cam.y, cam.z}, rot.x, rot.y, rot.z, cf.rf(), aspect);
     if (!s.valid) return;
     const double w = proj::view_width(s.depth, cf.rf());
-    stage_frame(static_cast<float>(s.u), static_cast<float>(s.v), static_cast<float>(w), static_cast<float>(w / aspect));
+    g.foot_u = static_cast<float>(s.u);
+    g.foot_v = static_cast<float>(s.v);
+    g.view_w = static_cast<float>(w);
+    g.view_h = static_cast<float>(w / aspect);
+    stage_frame(g.foot_u, g.foot_v, g.view_w, g.view_h);
 }
 
 void publish_vitals(UObject* pc, UObject* pawn, const std::wstring& anim, bool slow) {
@@ -443,6 +636,7 @@ void tick() {
     if (!g.names) {
         g.fn_construct = ue::fname(L"Construct");
         g.fn_destruct = ue::fname(L"Destruct");
+        g.fn_travel = ue::fname(kTravelHandler);
         for (const wchar_t* h : kBlockedHandlers) g.blocked.push_back(ue::fname(h));
         g.names = true;
     }
@@ -537,7 +731,7 @@ void tick() {
         drain_events(pc, pawn, loc);
         if ((hf.rest_pose != 0) != g.rest_pose) {
             g.rest_pose = hf.rest_pose != 0;
-            kneel(pawn, g.rest_pose);
+            rest(pc, pawn, g.rest_pose);
         }
     } else if (World* w = shm::world()) {
         w->to_guest.drain(); // stale requests from a previous Host session are never replayed
@@ -560,7 +754,8 @@ void tick() {
     }
 
     st.ready = (live && !g.held) ? 1u : 0u;
-    st.menu_open = g.menus.empty() ? 0u : 1u;
+    st.menu_open = std::ranges::any_of(g.menus, [](const ue::Weak& w) { return w.get() && w.get() != g.dormant.get(); }) ? 1u : 0u;
+    publish_frame_kind(pc, pawn, frame_kind(st.menu_open != 0));
     st.half_height = static_cast<float>(hh);
     st.radius = static_cast<float>(radius);
     st.frame_dt_p95 = g.frame_timer.p95();
@@ -571,6 +766,10 @@ void tick() {
 bool on_process_event_pre(UObject* ctx, ue::UFunction* fn) {
     if (!g.anchored || !g.names || !ctx || !fn) return false;
     const RC::Unreal::FName n = fn->GetNamePrivate();
+    if (n == g.fn_travel) {
+        if (host_alive()) rest_sleep(ctx);
+        return true;
+    }
     for (const auto& h : g.blocked) {
         if (n == h) {
             log::info(L"blocked EL world-business button %s", fn->GetName().c_str());
@@ -591,14 +790,20 @@ void on_process_event_post(UObject* ctx, ue::UFunction* fn) {
     if (!menu) return;
     if (construct) {
         g.menus.emplace_back(ctx);
-        if (cls == L"WBP_RestMenu_C") tidy_rest_menu(ctx);
+        if (cls == kRestMenu) tidy_rest_menu(ctx);
         // EL's map describes its own world — EM owns maps, so the category tab stays hidden (FR-MENU-EL-2)
         else if (cls == L"WBP_MainMenu_C") {
             if (UObject* tab = ue::obj(ctx, L"Map")) Call(tab, L"SetVisibility").i(1).go();
         }
     } else {
         std::erase_if(g.menus, [&](const ue::Weak& w) { return w.get() == ctx || !w.get(); });
-        if (cls == L"WBP_RestMenu_C" && !g.rest_pose) kneel(g.pawn.get(), false);
+        if (cls == kRestMenu) {
+            if (ctx == g.dormant.get()) g.dormant.reset();
+            if (!g.closing && host_alive()) { // the player left Lily's rest menu: the EM bench ends with it
+                if (World* w = shm::world()) w->to_host.push(Event::make(EventType::RestLeave, MenuPayload{}, clock::now_s()));
+            }
+            if (!g.rest_pose) kneel(g.pawn.get(), false);
+        }
     }
 }
 
@@ -624,10 +829,10 @@ void debug(const std::wstring& cmd) {
     else if (cmd == L"restore" && pc && pawn) full_restore(pc, pawn);
     else if (cmd == L"reanchor") reset_anchor();
     else if (cmd == L"isolate" && pc && pawn) stage_isolate_all(pc, pawn);
-    else if (cmd == L"menu" && pc && pawn) open_rest_menu(pc, ue::actor_location(pawn));
-    else if (cmd == L"menu2" && pc) open_menu(pc, ue::actor_location(pawn), MenuKind::Spirits);
-    else if (cmd == L"menu3" && pc) open_menu(pc, ue::actor_location(pawn), MenuKind::Relics);
-    else if (cmd == L"menu4" && pc) open_menu(pc, ue::actor_location(pawn), MenuKind::Strengthen);
+    else if (cmd == L"menu" && pc) open_rest_menu(pc);
+    else if (cmd == L"menu2" && pc) open_menu(pc, MenuKind::Spirits);
+    else if (cmd == L"menu3" && pc) open_menu(pc, MenuKind::Relics);
+    else if (cmd == L"menu4" && pc) open_menu(pc, MenuKind::Strengthen);
     else if (cmd == L"terrain") terrain_tick(ue::world_of(pc), g.map.map, g.origin.x, true);
 }
 

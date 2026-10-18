@@ -14,6 +14,7 @@
 #include <dxgi.h>
 
 #include <atomic>
+#include <cstring>
 #include <mutex>
 
 namespace lie::guest {
@@ -39,6 +40,8 @@ struct Export {
 struct Staged {
     std::mutex m;
     bool valid = false;
+    FrameKind kind = FrameKind::World;
+    float split[4]{};
     float foot_u = 0.5f, foot_v = 0.5f, view_w = 0.0f, view_h = 0.0f;
 } g_staged;
 
@@ -135,6 +138,8 @@ HRESULT STDMETHODCALLTYPE on_present(IDXGISwapChain* swap, UINT sync, UINT flags
                 meta.height = g_x.h;
                 {
                     std::scoped_lock sl(g_staged.m);
+                    meta.menu_frame = static_cast<std::uint32_t>(g_staged.kind);
+                    std::memcpy(meta.split, g_staged.split, sizeof(meta.split));
                     if (g_staged.valid) {
                         meta.foot_u = g_staged.foot_u;
                         meta.foot_v = g_staged.foot_v;
@@ -182,6 +187,12 @@ void stage_frame(float foot_u, float foot_v, float view_w_uu, float view_h_uu) {
     g_staged.foot_v = foot_v;
     g_staged.view_w = view_w_uu;
     g_staged.view_h = view_h_uu;
+}
+
+void stage_menu(FrameKind kind, const float split[4]) {
+    std::scoped_lock lk(g_staged.m);
+    g_staged.kind = kind;
+    std::memcpy(g_staged.split, split, sizeof(g_staged.split));
 }
 
 void* window() { return g_hwnd.load(); }
