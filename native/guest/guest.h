@@ -64,7 +64,7 @@ void combat_reset();
 // ---- g_body.cpp: main tick ----
 void tick();
 bool on_process_event_pre(UObject* ctx, ue::UFunction* fn);
-void on_process_event_post(UObject* ctx, ue::UFunction* fn);
+void on_process_event_post(UObject* ctx, ue::UFunction* fn, void* parms);
 std::string status();
 void debug(const std::wstring& cmd);
 

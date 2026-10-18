@@ -118,9 +118,21 @@ std::uint64_t __fastcall on_camera(UObject* cam, float dt, bool) { return g_came
 
 using XInputFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 XInputFn g_xinput = nullptr;
+// While the Host is alive the physical pad belongs to it. In Lily's menus it hands the pad back as is (EL's pad UI
+// layout already equals EM's), so EL shows pad prompts and navigates natively; elsewhere EL sees an idle pad.
 DWORD WINAPI on_xinput(DWORD index, XINPUT_STATE* st) {
     if (host_alive() && st) {
+        static DWORD packet = 0;
+        static PadState last{};
         std::memset(st, 0, sizeof(*st));
+        Control* c = shm::control();
+        InputFrame in{};
+        if (index == 0 && c && host_ctx() == Ctx::LilyMenu && c->input.read(in) && in.pad.connected) {
+            const PadState& p = in.pad;
+            if (std::memcmp(&p, &last, sizeof(p)) != 0) last = p, ++packet;
+            st->Gamepad = {p.buttons, p.lt, p.rt, p.lx, p.ly, p.rx, p.ry};
+        }
+        st->dwPacketNumber = packet;
         return index == 0 ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
     }
     return g_xinput(index, st);

@@ -3,6 +3,7 @@
 #include "core/binary_manifest.h"
 #include "core/combat_map.h"
 #include "core/frame_map.h"
+#include "core/input_map.h"
 #include "core/pose_ring.h"
 #include "core/projection.h"
 #include "core/protocol.h"
@@ -216,6 +217,119 @@ static void test_projection() {
     CHECK(near(pitched.u, 0.5) && near(pitched.v, 0.5, 1e-9));
 }
 
+static void test_input_routing() {
+    using namespace lie::input;
+    auto has = [](std::uint32_t bits, int b) { return (bits & (1u << b)) != 0; };
+    // key names as EM's / EL's settings store them
+    CHECK(input_from_name("H") == Input{'H'} && input_from_name("F11") == Input{0x7A} && input_from_name("SpaceBar") == Input{vk::Space});
+    CHECK(input_from_name("Gamepad_LeftThumbstick") == (Input{0, xb::LThumb}) && input_from_name("Gamepad_RightTrigger") == (Input{0, 0, 2}));
+    CHECK(!input_from_name("None").valid() && !input_from_name("").valid() && !input_from_name("F13").valid());
+    int names = 0;
+    for_each_key_name([&](const char* n) { names += input_from_name(n).valid() ? 1 : 0; });
+    CHECK(names == 26 + 12 + static_cast<int>(sizeof(kNamedKeys) / sizeof(kNamedKeys[0])));
+
+    // Lily's actions: the player's EL bindings (this machine's EL settings, read live 2026-10-19) + EM's interact,
+    // minus EM's keys (this machine's EM: interact E / L3, minimap R / R3, menu Tab / Back, pause Esc / Start)
+    using lie::cmd::Attack, lie::cmd::Dodge, lie::cmd::Heal, lie::cmd::Hook, lie::cmd::Interact, lie::cmd::Jump;
+    using lie::cmd::Sub1, lie::cmd::Sub2, lie::cmd::SummonSwitch;
+    lie::ElBindings el;
+    el.valid = 1;
+    auto bind = [&](int c, Input k, Input p) { el.kb[c][0] = k, el.pad[c][0] = p; };
+    bind(Jump, {vk::Space}, {0, xb::RB});
+    bind(Dodge, {vk::LShift}, {0, xb::LB});
+    bind(Attack, {'J'}, {0, xb::X});
+    bind(Sub1, {'K'}, {0, xb::Y});
+    bind(Sub2, {'L'}, {0, xb::B});
+    bind(SummonSwitch, {'Q'}, {0, xb::A});
+    bind(Hook, {'P'}, {0, 0, 2});
+    bind(Heal, {'R'}, {0, 0, 1});
+    bind(Interact, {'F'}, {0, xb::LThumb}); // EL's own interact key never applies: EM's does
+    el.kb_move[0][0] = {'W'}, el.kb_move[0][1] = {vk::Up}, el.kb_move[1][0] = {'S'}, el.kb_move[2][0] = {'A'}, el.kb_move[3][0] = {'D'};
+    EmWorldKeys em = em_default_world_keys();
+    em.interact_pad = {0, xb::LThumb};
+    em.reserved[11] = {0, xb::LThumb};
+    Bindings b;
+    Conflict cf[8];
+    const int nconf = compose_bindings(el, em, b, cf, 8);
+    CHECK(nconf == 2); // R (heal) is EM's minimap, Up (move) is EM's camera offset
+    CHECK(cf[0].cmd == Heal && cf[0].in == Input{'R'} && std::string(kEmReserved[cf[0].reserved]) == "Keyboard_Minimap");
+    CHECK(cf[1].cmd == 0 && cf[1].in == Input{vk::Up} && std::string(kEmReserved[cf[1].reserved]) == "Keyboard_CameraOffset_Up");
+    CHECK(!b.kb[Heal][0].valid() && b.pad[Heal][0] == (Input{0, 0, 1}) && !b.kb_move[0][1].valid() && b.kb_move[0][0] == Input{'W'});
+    CHECK(conflict_bit(cf[0]) == (1u << Heal) && cf[1].move == 0 && conflict_bit(cf[1]) == (1u << 16)); // rows the Guest tints
+    CHECK(b.kb[Interact][0] == Input{'E'} && b.pad[Interact][0] == (Input{0, xb::LThumb})); // EM's, not EL's F
+    auto pressed = [&](std::initializer_list<int> keys, std::uint16_t buttons = 0, std::uint8_t lt = 0, std::uint8_t rt = 0) {
+        Devices d;
+        for (int k : keys) d.keys.set(k);
+        if (buttons || lt || rt) d.pad = {true, buttons, lt, rt, 0, 0, 0, 0};
+        return lily_actions(d, b).raw;
+    };
+    CHECK(pressed({}, xb::A) == (1u << SummonSwitch)); // the set switch has no Lilac counterpart: EL decides
+    CHECK(pressed({}, 0, 0, 255) == (1u << Hook));     // one button, no chord
+    CHECK(pressed({}, xb::RB) == (1u << Jump) && pressed({}, xb::Y) == (1u << Sub1) && pressed({}, xb::B) == (1u << Sub2));
+    CHECK(pressed({}, xb::LThumb) == (1u << Interact) && pressed({}, 0, 255) == (1u << Heal));
+    CHECK(pressed({'J', 'K', 'L', 'Q', 'P', vk::Space, vk::LShift}) ==
+          ((1u << Attack) | (1u << Sub1) | (1u << Sub2) | (1u << SummonSwitch) | (1u << Hook) | (1u << Jump) | (1u << Dodge)));
+    CHECK(pressed({'E'}) == (1u << Interact) && pressed({'F'}) == 0 && pressed({'R'}) == 0);
+    CHECK(pressed({'Z', 'X', 'C', vk::Tab, vk::Escape, vk::Return, vk::Up, vk::Left}) == 0);
+    Devices mv;
+    mv.keys.set('D');
+    CHECK(lily_actions(mv, b).x == 1.0f);
+    mv.keys = Keys{};
+    mv.keys.set(vk::Up); // EM's camera offset, not Lily's movement
+    CHECK(lily_actions(mv, b).y == 0.0f);
+    lie::ElBindings none; // nothing published yet: only the pad's stick / d-pad and EM's interact work
+    compose_bindings(none, em, b);
+    CHECK(pressed({vk::Space}) == 0 && pressed({'E'}) == (1u << Interact));
+
+    // Lily's menus speak EM's UI keys
+    const UiKeys ui = em_default_ui_keys();
+    Keys m;
+    for (int k : std::initializer_list<int>{vk::Return, vk::Escape, vk::Tab, 'E', 'Q', 'W', vk::Down}) m.set(k);
+    const std::uint32_t mb = menu_bits(m, ui);
+    for (int i : {lie::menu::Confirm, lie::menu::Cancel, lie::menu::Context, lie::menu::Next, lie::menu::Prev, lie::menu::Up, lie::menu::Down})
+        CHECK(has(mb, i));
+    CHECK(!has(mb, lie::menu::Left) && !has(mb, lie::menu::Right));
+    Keys old_el; // EL's former menu keys no longer mean anything
+    for (int k : std::initializer_list<int>{'Z', 'X', 'C', vk::Space, vk::LShift, 'H', 'J'}) old_el.set(k);
+    CHECK(menu_bits(old_el, ui) == 0);
+    UiKeys remapped = ui; // EM's UI remap moves the intent
+    remapped.kb[lie::menu::Confirm][0] = {vk::Space};
+    Keys space;
+    space.set(vk::Space);
+    CHECK(menu_bits(space, remapped) == (1u << lie::menu::Confirm) && menu_bits(space, ui) == 0);
+    const Pad pad{true, static_cast<std::uint16_t>(xb::X | xb::RB | xb::Start | xb::Back), 255, 0, 0, 0, 0, 0};
+    const lie::PadState ps = menu_pad(pad);
+    CHECK(ps.connected && (ps.buttons & (xb::Start | xb::Back)) == 0 && (ps.buttons & xb::X) && ps.lt == 255);
+    CHECK(menu_pad(Pad{}).connected == 0);
+    CHECK(kElMenuVkDefault[lie::menu::Confirm] == vk::Return && kElMenuVkDefault[lie::menu::Context] == vk::Tab);
+    for (int i = 0; i < lie::menu::Count; ++i) CHECK((kElUiType[i] == 0) == (kElMenuKbDefault[i][0] == 0));
+
+    // Latch: what was held at the switch stays hidden until released, then works normally
+    Latch l;
+    Devices held;
+    held.keys.set(vk::Escape);
+    held.pad = {true, xb::B, 0, 200, 0, 20000, 0, 0};
+    l.arm(held);
+    Devices now = held;
+    now.keys.set('E'); // pressed after the switch: passes
+    l.apply(now);
+    CHECK(!now.keys.down(vk::Escape) && now.keys.down('E') && l.blocks(vk::Escape));
+    CHECK(now.pad.buttons == 0 && now.pad.rt == 0 && now.pad.ly == 0 && l.any());
+    Devices released; // everything let go once
+    released.pad.connected = true;
+    l.apply(released);
+    CHECK(!l.any() && !l.blocks(vk::Escape));
+    Devices again = held; // pressed again: the new owner sees it
+    l.apply(again);
+    CHECK(again.keys.down(vk::Escape) && again.pad.buttons == xb::B && again.pad.rt == 200 && again.pad.ly == 20000);
+    Latch partial; // releasing one input frees only that one
+    partial.arm(held);
+    Devices half = held;
+    half.keys = Keys{};
+    partial.apply(half);
+    CHECK(!partial.blocks(vk::Escape) && half.pad.buttons == 0 && partial.any());
+}
+
 static void test_layout() {
     static_assert(sizeof(lie::Event) == 64);
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free && std::atomic<std::uint64_t>::is_always_lock_free);
@@ -231,6 +345,7 @@ int main() {
     test_combat();
     test_manifests();
     test_projection();
+    test_input_routing();
     test_layout();
     std::printf("[lie_tests] %d checks passed\n", g_checks);
     return 0;

@@ -1,9 +1,9 @@
 #pragma once
 
-// Physical input -> Lily command frame (Host side), plus a scripted override for automation.
-// Default layout follows EM's own IMC_Default so muscle memory carries over, and never touches EM's
-// Pause (Esc/Start), Menu (Tab/Back), Minimap (R/RS) or CameraOffset (arrows / right stick) keys.
+// Host-side device reading + scripted override on top of the routing tables in core/input_map.h
+// (one physical layout, EM's own, mapped per context: docs/INPUT_MATRIX.md).
 
+#include "core/input_map.h"
 #include "core/protocol.h"
 
 #include <cstdint>
@@ -16,25 +16,29 @@ using XInputGetStateFn = unsigned long(__stdcall*)(unsigned long, void*);
 void set_xinput(XInputGetStateFn fn);
 XInputGetStateFn xinput();
 
-struct Pad {
-    bool connected = false;
-    float lx = 0.0f, ly = 0.0f;
-    std::uint16_t buttons = 0;
-    std::uint8_t lt = 0, rt = 0;
-};
 Pad read_pad();
+Devices read_devices(); // keyboard (GetAsyncKeyState) + pad 0; the caller decides focus / routing
+
+// EM's live layout (read on the game thread from EM's settings, used on the render thread); EM defaults until then
+void set_layout(const Bindings& b, const UiKeys& u);
+Bindings bindings();
+UiKeys ui_keys();
 
 // Scripted input merged over physical input for `frames` builds (AI pilot / tests)
 void script(float x, float y, std::uint32_t held, std::uint32_t taps, int frames);
+void script_menu(std::uint32_t held, int frames);
 
-// Builds the next frame: physical devices only when allowed (focused + routed to Lily).
+// Lily's action frame (Ctx::Gameplay); `d` is null when the frame is not routed to Lily.
 // Rising edges increment tap_seq so the Guest never misses a press between two of its frames.
 class FrameBuilder {
 public:
-    void build(InputFrame& out, bool devices);
+    void build(InputFrame& out, const Devices* d);
 
 private:
     std::uint32_t prev_raw_ = 0;
 };
+
+// Menu intents for Lily's menus (Ctx::LilyMenu): keyboard via menu_bits + scripted intents
+std::uint32_t build_menu(const Devices* d);
 
 } // namespace lie::input

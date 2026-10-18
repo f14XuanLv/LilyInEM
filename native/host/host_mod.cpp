@@ -120,7 +120,16 @@ int lua_act(const Lua& lua) {
     return 1;
 }
 
-// LIE_HostDebug("rebase" | "menu" | "menu2" | "menu3" | "menu4" | "restore" | "kill" | "terrain" | "lilac" | "bridge")
+// LIE_HostMenu(menu_bits, frames): scripted Lily-menu intents (protocol.h menu::), as if pressed on the keyboard
+int lua_menu(const Lua& lua) {
+    const auto held = lua.is_integer() ? static_cast<std::uint32_t>(lua.get_integer()) : 0u;
+    const int frames = lua.is_integer() ? static_cast<int>(lua.get_integer()) : 4;
+    lie::host::scripted_menu(held, frames);
+    lua.set_bool(true);
+    return 1;
+}
+
+// LIE_HostDebug("rebase" | "menu" | "menu2" | "menu3" | "menu4" | "pause" | "restore" | "kill" | "terrain" | "lilac" | "bridge")
 int lua_debug(const Lua& lua) {
     if (lua.is_string()) {
         const std::string cmd(lua.get_string());
@@ -189,6 +198,7 @@ public:
             if (!st) continue;
             st->register_function("LIE_HostStatus", lua_status);
             st->register_function("LIE_HostAct", lua_act);
+            st->register_function("LIE_HostMenu", lua_menu);
             st->register_function("LIE_HostDebug", lua_debug);
         }
     }

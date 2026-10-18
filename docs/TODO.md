@@ -8,10 +8,10 @@
 | 模块 | 文件 | 职责 |
 |---|---|---|
 | 版本相关二进制数据 | `data/binary/{EL,EM}.json` | SHA-256、RVA + 前缀、原生偏移；运行时由 `rt/binary.*` 读取；`tools/verify_binary.py` 离线校验 |
-| 核心（纯 C++，有单测） | `native/core/*.h` | 协议 `protocol.h`、映射 `frame_map.h`、姿态环 `pose_ring.h`、地形合并 `terrain_merge.h`、伤害换算 `combat_map.h`、事实 `facts.h` |
+| 核心（纯 C++，有单测） | `native/core/*.h` | 协议 `protocol.h`、映射 `frame_map.h`、键位 `input_map.h`、姿态环 `pose_ring.h`、地形合并 `terrain_merge.h`、伤害换算 `combat_map.h`、事实 `facts.h` |
 | 运行时基础 | `native/rt/*` | 共享内存、hook、反射调用 `ue.*`（支持按位置或按参数名传参）、输入、D3D |
 | Guest | `native/guest/*` | `g_body` 主循环 / 映射 / 发布；`g_terrain` 盒池；`g_combat` 代理 / 受击；`g_stage` 摄影棚；`g_input`；`g_frame` |
-| Host | `native/host/*` | `h_world` 编排 / 上下文 / 菜单 / 锁定 / 面片；`h_puppet`；`h_terrain`；`h_combat`；`h_render` |
+| Host | `native/host/*` | `h_world` 编排 / 上下文 / 菜单 / 锁定 / 面片；`h_input` 键位读取与合成（`docs\INPUT_MATRIX.md`）；`h_puppet`；`h_terrain`；`h_combat`；`h_render` |
 | 命令 | `build.bat [core] [test]`、`tools/{deploy,start,stop,eval,capture}.ps1` | 路径只来自 `devconfig.json` |
 
 ## 0.5 EL 无头引擎（摄影棚）现状
@@ -108,12 +108,12 @@
   | 设置 `Settings` | 打开 EL `WBP_Settings` | **部分接管** | 见下 |
 
   `Settings` 内部细分（按游戏业务判断，未逐页验证 `WBP_Settings` 结构）：
-  - 不需接管：EL 的**键位设置**——莉莉的操作键由 Host 按 EM 键位映射成命令位注入，EL 的键位不参与游戏操作；但 EL 菜单键（Enter/Esc/C/A/D）由 Guest 以固定虚拟键转发，改 EL 的 UI 键位会让转发失效，因此建议**隐藏或锁定**这一页，而不是交给 EM。
+  - [x] EL 的**键位设置**（2026-10-19，见 `docs\INPUT_MATRIX.md`）：**莉莉的动作键以 EL 键位页为准**（莉莉的能力表和莱拉克不对等）。交互用 EM 的键，与 EM 保留键撞键时 EM 优先。键位页保留，只隐藏 调查 / 小地图 / 主菜单 / 镜头 / UI Inputs 这些不生效的行；"请按键"期间原样转发键盘按键。EL 菜单键跟随 EM 的菜单键（`OverrideUIInput`）。
   - [x] 需接管或屏蔽：**画面设置**（分辨率 / 窗口模式 / 帧率等）——EL 导出窗口尺寸由 Host 推送（EM × `ResScale`），改了会破坏帧导出；画面以 EM 为准。（2026-10-19 已移除）
     - 设置页显示 `1024×768` 是控件兜底：实际 3200×1800 不在受支持分辨率列表里；`ResetToDefault` 才会真的写 1024×768。
     - `WBP_Settings_C` 页签寻址（menuprobe `--funcs` 读字节码）：`SelectTab(i)` 遍历 `TabArray` 设 `SetSelected` 并 `SettingsSwitcher.SetActiveWidgetIndex(i)`；`GoToSideTab` = `(CurrTabIndex ± 1) mod TabArray.Length`。只 Collapse 页签会留空页；只删 switcher 页会让后面的页内容错位一格。
     - 做法照抄 EL 自己的非 PC 分支（`SetupSettings` 里 `IsPCBuild` 为假时）：Construct 后 `GraphicsTab` / `WBP_Settings_Graphics` `RemoveFromParent`，并从 `TabArray` 删掉该项（`g_body.cpp` post-Construct）。实测正反循环 游戏→声音→控制器→键盘 回绕正确，关闭重开幂等。Apply / Reset / 分辨率 / 模式 / 缩放五个处理器仍在 `kBlockedScoped` 里兜底。
-    - 遗留：页签的鼠标点击处理器用常量 `SelectTab(3/4)`（控制器 / 键盘），移除后索引应为 2/3。Host 不向 EL 转发鼠标，目前不可触发；以后转发鼠标时要重映射。
+    - 页签的鼠标点击处理器写死了 `SelectTab(0..4)`：画面页移除后，控制器 / 键盘的索引都前移了一位。Host 不向 EL 转发鼠标，所以目前触发不了；以后要转发鼠标时，得按 `TabArray` 重新映射。
   - 需同步：**音量**（EL 的 BGM / 环境音已被静音，莉莉的音效仍走 EL 音量）、**语言**（EL 菜单文字）——建议跟随 EM 的设置，而不是两边各自设置。
   - 待定：伤害数字 / HUD 显示等 EL 游戏性选项（EL HUD 已关闭，大多无效果）。
 - [ ] 直开菜单 `MenuKind::Spirits/Relics/Strengthen` 现仅 debug `menu2/3/4` 使用；`MenuKind::Rest` 已改为直接创建，不再依赖 EL 地图里的 `BP_Interactable_RestingPoint_C`。

@@ -125,6 +125,11 @@ std::atomic<ID3D11Texture2D*> g_world_tex{nullptr};
 std::atomic<bool> g_world_active{false};
 std::atomic<bool> g_overlay{false};
 std::atomic<bool> g_swallow{false};
+// EM-side latch: what the player held while Lily's menu / the panel owned input stays hidden from EM until
+// released (WndProc on the game thread, XInput on EM's input thread, armed on the render thread)
+std::mutex g_em_latch_m;
+input::Latch g_em_latch;
+std::atomic<bool> g_em_latched{false};
 std::mutex g_equip_mutex;
 std::vector<EquipPayload> g_equip;
 
@@ -163,6 +168,7 @@ struct Toast {
     std::mutex m;
     std::string text;
     double until = 0.0;
+    std::string conflicts; // Lily bindings EM overrides, listed over EL's key binding pages
 } g_toast;
 
 HRESULT STDMETHODCALLTYPE on_create_tex(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC* d, const D3D11_SUBRESOURCE_DATA* init, ID3D11Texture2D** out) {
@@ -180,7 +186,15 @@ DWORD WINAPI on_xinput(DWORD i, XINPUT_STATE* st) {
         std::memset(st, 0, sizeof(*st));
         return i == 0 ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
     }
-    return g_xinput(i, st);
+    const DWORD r = g_xinput(i, st);
+    if (r == ERROR_SUCCESS && st && i == 0 && g_em_latched.load()) {
+        XINPUT_GAMEPAD& gp = st->Gamepad;
+        input::Pad p{true, gp.wButtons, gp.bLeftTrigger, gp.bRightTrigger, gp.sThumbLX, gp.sThumbLY, gp.sThumbRX, gp.sThumbRY};
+        std::scoped_lock lk(g_em_latch_m);
+        g_em_latch.apply_pad(p);
+        gp = {p.buttons, p.lt, p.rt, p.lx, p.ly, p.rx, p.ry};
+    }
+    return r;
 }
 
 void arm_xinput() {
@@ -196,6 +210,10 @@ void arm_xinput() {
 }
 
 LRESULT CALLBACK on_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && g_em_latched.load()) {
+        std::scoped_lock lk(g_em_latch_m);
+        if (g_em_latch.blocks(static_cast<int>(wp))) return 0;
+    }
     if (g_swallow.load()) {
         switch (msg) {
         case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_CHAR: case WM_SYSCHAR: case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: case WM_RBUTTONDOWN:
@@ -452,8 +470,13 @@ Ctx host_ctx(const Control* c) {
     return c->host_flags.read(f) ? static_cast<Ctx>(f.ctx) : Ctx::Inactive;
 }
 
+// One owner per context (docs/INPUT_MATRIX.md): Gameplay -> Lily's actions (EM keeps its system keys),
+// LilyMenu -> menu intents + pad to EL (EM swallowed), Overlay -> ImGui (EM swallowed), EmMenu / Inactive -> EM.
 void poll_input(Control* c, bool focused) {
-    static bool f5 = false, f6 = false, f7 = false, f8 = false, f10 = false, esc = false;
+    static bool f5 = false, f6 = false, f7 = false, f8 = false, f10 = false, esc = false, was_swallowing = false;
+    static Ctx prev = Ctx::Inactive;
+    static bool prev_selecting = false;
+    static input::Latch lily_latch;
     const Ctx ctx = host_ctx(c);
     if (focused) {
         if (edge(VK_F5, f5) && ctx == Ctx::Gameplay) ++g_toggles.pause_requests;
@@ -463,20 +486,35 @@ void poll_input(Control* c, bool focused) {
         if (edge(VK_F10, f10)) g_toggles.debug_hud = !g_toggles.debug_hud.load();
         if (edge(VK_ESCAPE, esc) && g_overlay.load()) g_overlay = false;
     }
-    const bool to_lily = ctx == Ctx::Gameplay || ctx == Ctx::LilyMenu;
-    g_r.input.build(g_r.frame, focused && to_lily);
-    if (ctx == Ctx::LilyMenu && focused) {
-        // menu keys that are not Lily actions: Esc / Backspace cancel, Enter confirm, arrows navigate
-        auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
-        if (down(VK_ESCAPE) || down(VK_BACK)) g_r.frame.raw |= 1u << cmd::Dodge;
-        if (down(VK_RETURN)) g_r.frame.raw |= 1u << cmd::Jump;
-        if (down(VK_UP)) g_r.frame.y = 1.0f;
-        if (down(VK_DOWN)) g_r.frame.y = -1.0f;
-        if (down(VK_LEFT)) g_r.frame.x = -1.0f;
-        if (down(VK_RIGHT)) g_r.frame.x = 1.0f;
-    }
+    const Ctx owner = g_overlay.load() ? Ctx::Overlay : ctx; // the panel toggles here, before the world thread sees it
+    const input::Devices raw = focused ? input::read_devices() : input::Devices{};
+    input::Devices dev = raw;
+    const bool menu = owner == Ctx::LilyMenu;
+    GuestStatus gs{};
+    // EL's key binding page waits for a key: every key goes to EL as is (the key that picks a binding must not
+    // also be read as a menu intent, and the one just bound must not leak into the menu afterwards)
+    const bool selecting = menu && c->guest_status.read(gs) && gs.selecting_key;
+    if (owner != prev || selecting != prev_selecting) lily_latch.arm(dev);
+    prev = owner;
+    prev_selecting = selecting;
+    lily_latch.apply(dev);
+
+    g_r.input.build(g_r.frame, owner == Ctx::Gameplay ? &dev : nullptr);
+    g_r.frame.menu = input::build_menu(menu && !selecting ? &dev : nullptr);
+    g_r.frame.pad = menu ? input::menu_pad(dev.pad) : PadState{};
+    for (int i = 0; i < 4; ++i) g_r.frame.keys[i] = selecting ? dev.keys.bits[i] : 0;
     c->input.store(g_r.frame);
-    g_swallow = ctx == Ctx::LilyMenu || ctx == Ctx::Overlay || g_overlay.load();
+
+    const bool swallow = menu || owner == Ctx::Overlay;
+    {
+        std::scoped_lock lk(g_em_latch_m);
+        if (was_swallowing && !swallow) g_em_latch.arm(raw);
+        input::Keys k = raw.keys;
+        g_em_latch.apply_keys(k);
+        g_em_latched = g_em_latch.any();
+    }
+    was_swallowing = swallow;
+    g_swallow = swallow;
 }
 
 void queue_equip(EquipOp op, int set, int slot, const char* id) {
@@ -684,12 +722,25 @@ void render_frame(IDXGISwapChain* swap) {
     if (ctx == Ctx::Gameplay && g_world_active) draw_hud(v, io.DisplaySize);
     {
         std::scoped_lock lk(g_toast.m);
-        if (!g_toast.text.empty() && clock::now_s() < g_toast.until) {
+        auto* fg = ImGui::GetForegroundDrawList();
+        GuestStatus gs{};
+        const bool binding_page = ctx == Ctx::LilyMenu && c->guest_status.read(gs) && gs.binding_page;
+        // over EL's key binding page the red rows + the banner below replace toasts (they would cover the rows)
+        if (!g_toast.text.empty() && clock::now_s() < g_toast.until && !binding_page) {
             const ImVec2 sz = ImGui::CalcTextSize(g_toast.text.c_str());
-            const ImVec2 p((io.DisplaySize.x - sz.x) * 0.5f, io.DisplaySize.y * 0.12f);
-            auto* fg = ImGui::GetForegroundDrawList();
+            const ImVec2 p((io.DisplaySize.x - sz.x) * 0.5f, io.DisplaySize.y * 0.2f); // below EL's tab row
             fg->AddRectFilled(ImVec2(p.x - 16, p.y - 8), ImVec2(p.x + sz.x + 16, p.y + sz.y + 8), IM_COL32(10, 10, 14, 170), 6.0f);
             fg->AddText(p, IM_COL32(236, 226, 205, 255), g_toast.text.c_str());
+        }
+        // Over EL's key binding page (whose conflicting rows the Guest tints red): what EM overrides, while it lasts
+        if (!g_toast.conflicts.empty() && binding_page) {
+            const std::string text = "红色的键与 EM 撞键，莉莉模式下不生效（EM 优先）：\n" + g_toast.conflicts;
+            ImFont* font = ImGui::GetFont();
+            const float px = std::max(18.0f, io.DisplaySize.y * 0.024f); // ~26 px at 1080p, readable next to EL's UI
+            const ImVec2 sz = font->CalcTextSizeA(px, FLT_MAX, 0.0f, text.c_str());
+            const ImVec2 p(io.DisplaySize.x * 0.03f, io.DisplaySize.y * 0.97f - sz.y);
+            fg->AddRectFilled(ImVec2(p.x - 14, p.y - 10), ImVec2(p.x + sz.x + 14, p.y + sz.y + 10), IM_COL32(40, 8, 10, 200), 6.0f);
+            fg->AddText(font, px, p, IM_COL32(255, 196, 186, 255), text.c_str());
         }
     }
     if (g_toggles.debug_hud) draw_debug(c, io.DisplaySize, guest_fresh);
@@ -778,10 +829,15 @@ bool world_rt_captured() { return g_world_tex.load() != nullptr; }
 void set_world_layer(bool active) { g_world_active = active; }
 bool overlay_open() { return g_overlay.load(); }
 
-void toast(const char* text) {
+void toast(const char* text, double seconds) {
     std::scoped_lock lk(g_toast.m);
     g_toast.text = text ? text : "";
-    g_toast.until = clock::now_s() + 2.5;
+    g_toast.until = clock::now_s() + seconds;
+}
+
+void set_binding_conflicts(const char* text) {
+    std::scoped_lock lk(g_toast.m);
+    g_toast.conflicts = text ? text : "";
 }
 
 } // namespace lie::render

@@ -8,6 +8,7 @@
 
 #include "core/el_items.h"
 #include "core/facts.h"
+#include "core/input_map.h"
 #include "core/pose_ring.h"
 #include "core/projection.h"
 #include "rt/clock.h"
@@ -55,7 +56,63 @@ constexpr const wchar_t* kBlockedHandlers[] = {
     L"InpActEvt_Pause_K2Node_InputActionEvent_4",
     L"OnApplicationWillDeactivate",
     L"TriggerOrDeferPause",
+    // PC_Base's other world-input actions (DefaultInput.ini: MainMenu = Tab, Minimap = Q, DEBUG = One): Tab / Q are
+    // Lily-menu keys (Context / Previous, EM's layout) pressed into EL's menus, and EL's main menu / minimap are not
+    // opened by keys at all (the Host asks for menus by event; EM owns the map)
+    L"InpActEvt_MainMenu_K2Node_InputActionEvent_5",
+    L"InpActEvt_Minimap_K2Node_InputActionEvent_0",
+    L"InpActEvt_DEBUG_K2Node_InputActionEvent_3",
+    L"InpActEvt_DEBUG_Modifier_K2Node_InputActionEvent_2",
+    L"InpActEvt_DEBUG_Modifier_K2Node_InputActionEvent_1",
 };
+
+// Settings pages EL must not show in Lily mode: tab, page. Graphics: EM owns video, EL's window is the Host's
+// off-screen render target. The key binding pages stay: they are where Lily's action keys are set.
+constexpr struct {
+    const wchar_t* tab;
+    const wchar_t* page;
+} kPoppedSettings[] = {
+    {L"GraphicsTab", L"WBP_Settings_Graphics"},
+};
+// Rows of EL's key binding pages that never apply in Lily mode (docs/INPUT_MATRIX.md), by widget name in the
+// page's WidgetTree [CUE4P]: interact (EM's key), minimap / main menu / camera (EM keeps them), and the whole UI
+// section (EL's menus are bound to EM's UI keys). Lily's movement rows stay.
+constexpr struct {
+    const wchar_t* page;
+    const wchar_t* widget;
+} kHiddenBindingRows[] = {
+    {L"WBP_KeyBindings_Keyboard", L"WBP_KeyBindingEntry_C_1"},  // Interact
+    {L"WBP_KeyBindings_Keyboard", L"WBP_KeyBindingEntry_C_12"}, // Minimap
+    {L"WBP_KeyBindings_Keyboard", L"WBP_KeyBindingEntry_C_16"}, // Main menu
+    {L"WBP_KeyBindings_Keyboard", L"WBP_KeyBindingEntry_C_27"}, // Camera Up
+    {L"WBP_KeyBindings_Keyboard", L"WBP_KeyBindingEntry_C_28"}, // Camera Down
+    {L"WBP_KeyBindings_Keyboard", L"WBP_KeyBindingEntry_C_29"}, // Camera Left
+    {L"WBP_KeyBindings_Keyboard", L"WBP_KeyBindingEntry_C_30"}, // Camera Right
+    {L"WBP_KeyBindings_Keyboard", L"HorizontalBox_174"},        // UI section title
+    {L"WBP_KeyBindings_Keyboard", L"WrapBox_UIInputs"},
+    {L"WBP_KeyBindings_Gamepad", L"WBP_KeyBindingEntry_C_1"},   // Interact
+    {L"WBP_KeyBindings_Gamepad", L"WBP_KeyBindingEntry_C_8"},   // Minimap
+};
+// Rows of Lily's actions per conflict bit (input::conflict_bit: cmd 1..8, movement 16..19) [CUE4P]; the same
+// widget names on both pages, the gamepad page has no movement rows
+constexpr struct {
+    std::uint32_t bit;
+    const wchar_t* widget;
+} kBindingRows[] = {
+    {1u << cmd::Jump, L"WBP_KeyBindingEntry"},       {1u << cmd::Dodge, L"WBP_KeyBindingEntry_C"},
+    {1u << cmd::Attack, L"WBP_KeyBindingEntry_C_2"}, {1u << cmd::Sub1, L"WBP_KeyBindingEntry_C_3"},
+    {1u << cmd::Sub2, L"WBP_KeyBindingEntry_C_4"},   {1u << cmd::SummonSwitch, L"WBP_KeyBindingEntry_C_5"},
+    {1u << cmd::Hook, L"WBP_KeyBindingEntry_C_6"},   {1u << cmd::Heal, L"WBP_KeyBindingEntry_C_7"},
+    {1u << 16, L"WBP_KeyBindingEntry_C_8"},          {1u << 17, L"WBP_KeyBindingEntry_C_9"},
+    {1u << 18, L"WBP_KeyBindingEntry_C_10"},         {1u << 19, L"WBP_KeyBindingEntry_C_11"},
+};
+constexpr const wchar_t* kBindingPages[2] = {L"WBP_KeyBindings_Keyboard", L"WBP_KeyBindings_Gamepad"};
+// WBP_Settings_C handlers of the pages' OnKeyBindingModeChanged(KeyBindingEntry, bool IsSelectingKey @ +8)
+constexpr const wchar_t* kKeySelectHandlers[] = {
+    L"BndEvt__WBP_KeyBindings_Keyboard_K2Node_ComponentBoundEvent_7_OnKeyBindingModeChanged__DelegateSignature",
+    L"BndEvt__WBP_KeyBindings_Gamepad_K2Node_ComponentBoundEvent_6_OnKeyBindingModeChanged__DelegateSignature",
+};
+constexpr std::size_t kIsSelectingKeyOffset = 8;
 // Scoped to one widget class: these generated handler names are not globally unique (other widgets
 // bind members named WBP_DefaultButton etc. the same way). WBP_Settings_Graphics (F5 -> settings):
 // EM owns video settings; EL's window is a fixed off-screen render target the Host scales, so nothing
@@ -108,7 +165,7 @@ struct State {
     std::vector<ue::Weak> menus;
     pose::FrameTimer<120> frame_timer;
     GuestCounters k{};
-    clock::Every title_try{1.5}, title_check{0.5}, pc_lookup{1.0}, slow{0.25}, counters_pub{0.25}, res_poll{0.5};
+    clock::Every title_try{1.5}, title_check{0.5}, pc_lookup{1.0}, slow{0.25}, counters_pub{0.25}, res_poll{0.5}, ui_keys{2.0};
     std::uint32_t res_w = 0, res_h = 0; // last frame size the Host asked for (guest_res_w/h)
     int wake_taps = 0;
     double next_wake = 0.0;
@@ -119,7 +176,13 @@ struct State {
     ue::Weak camera;
     float foot_u = 0.5f, foot_v = 0.5f, view_w = 0.0f, view_h = 0.0f; // last projection
     RC::Unreal::FName fn_construct{}, fn_destruct{}, fn_travel{};
-    std::vector<RC::Unreal::FName> blocked;
+    std::vector<RC::Unreal::FName> blocked, fn_key_select;
+    bool selecting_key = false; // EL's key binding page waits for a key
+    int publish_now = 0;        // frames left to publish EL's bindings at once (a rebinding just landed)
+    ue::Weak settings;          // live WBP_Settings_C
+    std::uint32_t tinted[2] = {~0u, ~0u}; // conflict masks last applied to the keyboard / gamepad page
+    clock::Every el_keys{2.0};
+    ElBindings el_bindings{};
     std::vector<std::pair<RC::Unreal::FName, std::wstring>> blocked_scoped;
     bool names = false;
     Vitals vitals{};
@@ -657,6 +720,122 @@ void publish_counters() {
 }
 UObject* lily() { return g.pawn.get(); }
 
+// EL's UI bindings follow EM's live UI keys (Control::ui_layout, EM's defaults until the Host has read them), so
+// EL's prompts show what the player presses (docs/INPUT_MATRIX.md); navigation stays on EL's arrows / d-pad.
+// UMGSubsystem::OverrideUIInput replaces the binding of the key's device only (keyboard or pad). Checked against
+// the key EL *displays* (GetKeyForUIInput): VALIDATION / CANCEL also accept Enter / Escape by default but show
+// Z / X. Re-asserted because loading EL's settings brings its own bindings back once after boot.
+void sync_el_menu_keys() {
+    UObject* umg = ue::first(L"UMGSubsystem");
+    if (!umg) return;
+    struct KeyArg { // FKey: FName KeyName + TSharedPtr<FKeyDetails> (null: resolved by name)
+        RC::Unreal::FName name;
+        void* details[2]{};
+    };
+    UiLayout l{};
+    const bool live = ctl() && ctl()->ui_layout.read(l) && l.valid;
+    for (int i = 0; i < menu::Count; ++i) {
+        const std::uint8_t type = input::kElUiType[i];
+        if (!type) continue;
+        for (const bool pad : {false, true}) {
+            const char* name = pad ? (live ? l.pad[i] : "") : (live && l.kb[i][0] ? l.kb[i] : input::kElMenuKbDefault[i]);
+            if (!name[0]) continue;
+            const std::wstring wname(name, name + std::strlen(name));
+            const KeyArg key{ue::fname(wname.c_str())};
+            Call shown(umg, L"GetKeyForUIInput");
+            ue::FProperty* rv = shown.param(L"ReturnValue");
+            if (shown.i(type).b(pad).go() && rv && static_cast<const KeyArg*>(shown.slot(rv))->name == key.name) continue;
+            Call(umg, L"OverrideUIInput").i(type).copy(&key).go();
+            log::info(L"EL UI key %d (%s) -> %s", type, pad ? L"pad" : L"keyboard", wname.c_str());
+        }
+    }
+}
+
+// Lily's action keys = the player's EL bindings (EL's key binding pages): InputSettingsSubsystem
+// GetInputChordsForAction / GetInputChordsForAxis -> Control::el_bindings, composed by the Host with EM's keys.
+// Chords with Shift / Ctrl / Alt / Cmd are skipped (EL's pages do not make them; the Host matches single keys).
+void read_chords(UObject* settings, const wchar_t* fn, const wchar_t* name, const float* scale, Input kb[2], Input pad[2]) {
+    struct KeyArg {
+        RC::Unreal::FName name;
+        void* details[2]{};
+    };
+    Call c(settings, fn);
+    ue::FProperty* rv = c.param(L"ReturnValue");
+    ue::FProperty* inner = rv ? ue::array_inner(rv) : nullptr;
+    c.n(name);
+    if (scale) c.f(*scale);
+    if (!inner || !c.go()) return;
+    const auto* arr = static_cast<const ue::RawArray*>(c.slot(rv));
+    const std::int32_t stride = inner->GetElementSize();
+    int nk = 0, np = 0;
+    for (std::int32_t i = 0; arr && arr->data && i < arr->num; ++i) {
+        const auto* e = static_cast<const std::uint8_t*>(arr->data) + static_cast<std::ptrdiff_t>(i) * stride;
+        if (e[sizeof(KeyArg)] & 0x0F) continue; // FInputChord bShift / bCtrl / bAlt / bCmd follow the FKey
+        std::string key;
+        for (const wchar_t ch : ue::str(reinterpret_cast<const KeyArg*>(e)->name)) key.push_back(static_cast<char>(ch));
+        const Input in = input::input_from_name(key.c_str());
+        if (in.vk && nk < 2) kb[nk++] = in;
+        else if (!in.vk && in.valid() && np < 2) pad[np++] = in;
+    }
+}
+
+void publish_el_bindings() {
+    UObject* s = ue::first(L"InputSettingsSubsystem");
+    UObject* save = ue::first(L"SaveSubsystem");
+    Control* c = ctl();
+    // before EL's settings are loaded the subsystem holds DefaultInput.ini, not the player's bindings
+    if (!s || !c || !save || !ue::call_bool(save, L"IsSettingsLoaded")) return;
+    ElBindings b{};
+    b.valid = 1;
+    for (int k = 1; k < cmd::Count; ++k) {
+        if (!input::kElAction[k]) continue;
+        const std::string a = input::kElAction[k];
+        read_chords(s, L"GetInputChordsForAction", std::wstring(a.begin(), a.end()).c_str(), nullptr, b.kb[k], b.pad[k]);
+    }
+    for (int m = 0; m < 4; ++m) {
+        Input pad[2]{};
+        const std::string a = input::kElMoveAxis[m].axis;
+        read_chords(s, L"GetInputChordsForAxis", std::wstring(a.begin(), a.end()).c_str(), &input::kElMoveAxis[m].scale, b.kb_move[m], pad);
+    }
+    if (!(b == g.el_bindings)) log::info(L"EL bindings published");
+    g.el_bindings = b;
+    c->el_bindings.store(b);
+}
+
+// A widget inside one of WBP_Settings_C's pages, by its name in that page's WidgetTree
+UObject* page_widget(UObject* settings, const wchar_t* page_name, const wchar_t* widget) {
+    UObject* page = ue::obj(settings, page_name);
+    if (!page) return nullptr;
+    const std::wstring full = page->GetFullName(); // "<Class> <path>"
+    return ue::find(full.substr(full.find(L' ') + 1) + L".WidgetTree." + widget);
+}
+
+// Lily bindings EM overrides show where they are set: the row turns red on EL's key binding page (the Host lists
+// them next to it). Returns which binding page is on screen (GuestStatus::binding_page).
+std::uint32_t binding_pages_tick() {
+    UObject* s = g.settings.get();
+    Control* c = ctl();
+    if (!s || !c) return 0;
+    const std::uint32_t masks[2] = {c->conflicts_kb.load(), c->conflicts_pad.load()};
+    for (int p = 0; p < 2; ++p) {
+        if (masks[p] == g.tinted[p]) continue;
+        bool found = false;
+        for (const auto& r : kBindingRows) {
+            UObject* w = page_widget(s, kBindingPages[p], r.widget);
+            if (!w) continue;
+            const bool bad = (masks[p] & r.bit) != 0;
+            const ue::Color col = bad ? ue::Color{1.0f, 0.32f, 0.28f, 1.0f} : ue::Color{1.0f, 1.0f, 1.0f, 1.0f};
+            found = Call(w, L"SetColorAndOpacity").copy(&col).go() || found;
+        }
+        if (found) g.tinted[p] = masks[p];
+    }
+    UObject* active = ue::call_obj(ue::obj(s, L"SettingsSwitcher"), L"GetActiveWidget");
+    for (int p = 0; p < 2; ++p) {
+        if (active && active == ue::obj(s, kBindingPages[p])) return static_cast<std::uint32_t>(p + 1);
+    }
+    return 0;
+}
+
 // ================= tick =================
 
 void tick() {
@@ -669,6 +848,7 @@ void tick() {
         g.fn_travel = ue::fname(kTravelHandler);
         for (const wchar_t* h : kBlockedHandlers) g.blocked.push_back(ue::fname(h));
         for (const auto& h : kBlockedScoped) g.blocked_scoped.emplace_back(ue::fname(h.fn), h.cls);
+        for (const wchar_t* h : kKeySelectHandlers) g.fn_key_select.push_back(ue::fname(h));
         g.names = true;
     }
     c->guest_pid.store(GetCurrentProcessId());
@@ -708,6 +888,11 @@ void tick() {
                 g.res_h = rh;
             }
         }
+    }
+    if (g.ui_keys.due(now)) sync_el_menu_keys();
+    if (g.el_keys.due(now) || g.publish_now > 0) {
+        publish_el_bindings();
+        if (g.publish_now > 0) --g.publish_now;
     }
     UObject* pawn = pc ? ue::obj(pc, L"Pawn") : nullptr;
     if (!g.anchored && g.title_check.due(now)) g.in_title = ue::first(L"TitleMap_C") != nullptr;
@@ -815,6 +1000,9 @@ void tick() {
     st.ready = (live && !g.held) ? 1u : 0u;
     st.menu_open = std::ranges::any_of(g.menus, [](const ue::Weak& w) { return w.get() && w.get() != g.dormant.get(); }) ? 1u : 0u;
     publish_frame_kind(pc, pawn, frame_kind(st.menu_open != 0));
+    if (!st.menu_open) g.selecting_key = false;
+    st.selecting_key = g.selecting_key ? 1u : 0u;
+    st.binding_page = st.menu_open ? binding_pages_tick() : 0u;
     st.half_height = static_cast<float>(hh);
     st.radius = static_cast<float>(radius);
     st.frame_dt_p95 = g.frame_timer.p95();
@@ -844,33 +1032,47 @@ bool on_process_event_pre(UObject* ctx, ue::UFunction* fn) {
     return false;
 }
 
-void on_process_event_post(UObject* ctx, ue::UFunction* fn) {
+void on_process_event_post(UObject* ctx, ue::UFunction* fn, void* parms) {
     if (!g.names || !ctx || !fn) return;
     const RC::Unreal::FName n = fn->GetNamePrivate();
+    if (parms && std::ranges::find(g.fn_key_select, n) != g.fn_key_select.end()) {
+        g.selecting_key = *(static_cast<const std::uint8_t*>(parms) + kIsSelectingKeyOffset) != 0;
+        if (!g.selecting_key) g.publish_now = 3; // the Host recomposes (and reports a conflict) within a frame
+        log::info(L"EL key binding: %s", g.selecting_key ? L"waiting for a key (raw keys)" : L"done");
+        return;
+    }
     const bool construct = n == g.fn_construct;
     if (!construct && n != g.fn_destruct) return;
     const std::wstring cls = ue::class_name(ctx);
+    if (!construct && cls == L"WBP_Settings_C") g.selecting_key = false;
     if (construct && cls == L"WBP_Settings_C") {
-        // The graphics tab lies in Lily mode (the export size is not a desktop mode) and its Apply /
-        // Reset handlers are blocked. Pop it the way EL's own non-PC branch of SetupSettings does:
-        // tab + page RemoveFromParent and drop the tab from TabArray, which SelectTab / GoToSideTab
-        // index (wrap over TabArray.Length, switcher index == TabArray index). No blank page.
-        UObject* tab = ue::obj(ctx, L"GraphicsTab");
+        g.settings.set(ctx);
+        g.tinted[0] = g.tinted[1] = ~0u;
+        for (const auto& r : kHiddenBindingRows) {
+            if (UObject* w = page_widget(ctx, r.page, r.widget)) Call(w, L"SetVisibility").i(1).go();
+        }
+        // Pop pages (kPoppedSettings) the way EL's own non-PC branch of SetupSettings does: tab + page
+        // RemoveFromParent and drop the tab from TabArray, which SelectTab / GoToSideTab index (wrap over
+        // TabArray.Length, switcher index == TabArray index). Collapsing alone leaves a blank page in the cycle.
         auto* arr = static_cast<ue::RawArray*>(ue::field_ptr(ctx, L"TabArray"));
-        if (tab && arr && arr->data) {
+        auto cur = static_cast<std::int32_t>(ue::num(ctx, L"CurrTabIndex"));
+        bool popped = false;
+        for (const auto& s : kPoppedSettings) {
+            UObject* tab = ue::obj(ctx, s.tab);
+            if (!tab || !arr || !arr->data) continue;
             auto** items = static_cast<UObject**>(arr->data);
             for (std::int32_t i = 0; i < arr->num; ++i) {
                 if (items[i] != tab) continue;
                 std::memmove(items + i, items + i + 1, sizeof(UObject*) * (arr->num - i - 1));
                 --arr->num;
+                if (cur > i) --cur;
                 Call(tab, L"RemoveFromParent").go();
-                if (UObject* page = ue::obj(ctx, L"WBP_Settings_Graphics")) Call(page, L"RemoveFromParent").go();
-                auto cur = static_cast<std::int32_t>(ue::num(ctx, L"CurrTabIndex"));
-                if (cur > i || cur >= arr->num) cur = cur >= arr->num ? 0 : cur - 1;
-                Call(ctx, L"SelectTab").i(cur).go();
+                if (UObject* page = ue::obj(ctx, s.page)) Call(page, L"RemoveFromParent").go();
+                popped = true;
                 break;
             }
         }
+        if (popped) Call(ctx, L"SelectTab").i(cur >= 0 && cur < arr->num ? cur : 0).go();
     }
     bool menu = false;
     for (const wchar_t* m : kMenuClasses) menu = menu || cls == m;

@@ -498,6 +498,7 @@ void tick_pre(float) {
         g.pc.set(ue::first(L"PlayerControllerZion"));
         pc = g.pc.get();
     }
+    if (pc) input_layout_tick(pc, now);
     UObject* pawn = pc ? ue::obj(pc, L"Pawn") : nullptr;
     if (!pawn || ue::class_name(pawn) != facts::em::kLilacClass) {
         if (g.active) deactivate(pc, nullptr);
@@ -630,10 +631,10 @@ std::string status() {
     char buf[900];
     std::snprintf(buf, sizeof(buf),
                   "active=%d locked=%d ctx=%d guestReady=%u guestMenu=%u resting=%d bench=%d travel=%d rebase=%u mapped=%d puppetFrames=%u puppetErrMax=%.4f %s "
-                  "dmgIntercepted=%u kbIntercepted=%u hpCorrections=%u hitsApplied=%u enemyDamage=%u quad=%d rt=%d",
+                  "dmgIntercepted=%u kbIntercepted=%u hpCorrections=%u hitsApplied=%u enemyDamage=%u quad=%d rt=%d %s",
                   g.active, g.locked, static_cast<int>(g.ctx), gs.ready, gs.menu_open, g.resting, g.bench_menu ? 1 : 0, g.travel, puppet_rebase_seq(), puppet_mapping_ready(), g.k.puppet_frames,
                   g.k.puppet_err_max, terrain_status().c_str(), g.k.dmg_intercepted, g.k.kb_intercepted, g.k.lilac_hp_corrections, g.k.hit_events_applied,
-                  g.k.enemy_damage_calls, g.quad ? 1 : 0, render::world_rt_captured() ? 1 : 0);
+                  g.k.enemy_damage_calls, g.quad ? 1 : 0, render::world_rt_captured() ? 1 : 0, input_layout_status().c_str());
     return buf;
 }
 
@@ -644,6 +645,7 @@ void debug(const std::wstring& cmd) {
     else if (cmd == L"menu2") send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Spirits}, clock::now_s()));
     else if (cmd == L"menu3") send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Relics}, clock::now_s()));
     else if (cmd == L"menu4") send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Strengthen}, clock::now_s()));
+    else if (cmd == L"pause") send_to_guest(Event::make(EventType::OpenMenu, MenuPayload{MenuKind::Pause}, clock::now_s()));
     else if (cmd == L"restore") send_to_guest(Event::make(EventType::Restore, LethalPayload{}, clock::now_s()));
     else if (cmd == L"kill") combat_on_event(g.pc.get(), pawn, Event::make(EventType::Lethal, LethalPayload{}, clock::now_s()));
     else if (cmd == L"terrain") terrain_reset();
@@ -652,5 +654,6 @@ void debug(const std::wstring& cmd) {
 }
 
 void scripted_input(float x, float y, std::uint32_t held, std::uint32_t taps, int frames) { input::script(x, y, held, taps, frames); }
+void scripted_menu(std::uint32_t held, int frames) { input::script_menu(held, frames); }
 
 } // namespace lie::host

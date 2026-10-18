@@ -124,7 +124,7 @@ if (options.ContainsKey("tree"))
 }
 
 // Packaged engine config: DPI scaling rule + design resolution
-foreach (var cfg in new[] { "EnderLilies/Config/DefaultEngine.ini", "EnderLilies/Config/DefaultGame.ini" })
+foreach (var cfg in new[] { "EnderLilies/Config/DefaultEngine.ini", "EnderLilies/Config/DefaultGame.ini", "EnderLilies/Config/DefaultInput.ini" })
 {
     if (!provider.Files.TryGetValue(cfg, out var file)) { Console.WriteLine($"missing {cfg}"); continue; }
     var text = System.Text.Encoding.UTF8.GetString(file.Read());

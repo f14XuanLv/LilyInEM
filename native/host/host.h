@@ -46,6 +46,10 @@ void combat_on_event(UObject* pc, UObject* pawn, const Event& e);
 void combat_reset();
 std::uint32_t entity_id_of(UObject* actor);
 
+// ---- h_input.cpp ----
+void input_layout_tick(UObject* pc, double now); // EM's live key layout -> Lily's actions / menus (+ Guest's EL UI keys)
+std::string input_layout_status();
+
 // ---- h_world.cpp ----
 void tick_pre(float dt);
 void on_begin_play(UObject* actor);
@@ -54,6 +58,7 @@ void on_process_event_post(UObject* ctx, ue::UFunction* fn, void* parms);
 std::string status();
 void debug(const std::wstring& cmd);
 void scripted_input(float x, float y, std::uint32_t held, std::uint32_t taps, int frames);
+void scripted_menu(std::uint32_t held, int frames);
 
 // shared helpers
 UObject* lilac();
@@ -82,6 +87,7 @@ void set_guest_res_scale(float s);    // EL frame = EM back buffer x this (defau
 bool world_rt_captured();             // the native texture of our world-layer render target was seen
 void set_world_layer(bool active);    // render thread writes the keyed Lily frame into the RT
 bool overlay_open();                  // F6 loadout panel (Overlay context)
-void toast(const char* utf8);
+void toast(const char* utf8, double seconds = 2.5);
+void set_binding_conflicts(const char* utf8); // shown while EL's key binding page is on screen ("" = none)
 
 } // namespace lie::render

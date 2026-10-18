@@ -19,7 +19,7 @@
 namespace lie {
 
 inline constexpr std::uint32_t kMagic = 0x4D45494Cu; // "LIEM"
-inline constexpr std::uint32_t kProtocol = 2;
+inline constexpr std::uint32_t kProtocol = 6;
 inline constexpr const wchar_t* kControlShmName = L"Local\\LilyInEM_Control_v1";
 inline constexpr const wchar_t* kWorldShmName = L"Local\\LilyInEM_World_v1";
 
@@ -38,6 +38,22 @@ inline constexpr int Count = 10;
 inline constexpr std::uint32_t Mask = 0x3FEu;
 } // namespace cmd
 
+// Menu intents in Lily's menus (Ctx::LilyMenu), read from EM's own UI layout so every menu speaks one
+// language (docs/INPUT_MATRIX.md). The Guest presses the matching EL UI key, whose binding it overrides to the
+// same physical key so EL's on-screen prompts tell the truth.
+namespace menu {
+inline constexpr int Up = 0;
+inline constexpr int Down = 1;
+inline constexpr int Left = 2;
+inline constexpr int Right = 3;
+inline constexpr int Confirm = 4;
+inline constexpr int Cancel = 5;
+inline constexpr int Context = 6;
+inline constexpr int Next = 7;
+inline constexpr int Prev = 8;
+inline constexpr int Count = 9;
+} // namespace menu
+
 // Who owns the player's input (decided by the Host only)
 enum class Ctx : std::uint32_t {
     Gameplay = 0, // action keys -> Lily; EM keeps pause / menu / minimap / camera keys
@@ -49,10 +65,38 @@ enum class Ctx : std::uint32_t {
 
 // ---------------- Control block ----------------
 
+// One physical input (resolved from a UE FKey name, core/input_map.h input_from_name)
+struct Input {
+    std::int32_t vk = 0;          // keyboard / mouse virtual key
+    std::uint16_t button = 0;     // pad button (XINPUT_GAMEPAD_*)
+    std::uint8_t trigger = 0;     // 1 = LT, 2 = RT
+    std::uint8_t unused = 0;
+    bool valid() const { return vk || button || trigger; }
+    bool operator==(const Input&) const = default;
+};
+
+// Lily's action keys as the player set them in EL's own key binding pages (Lily's abilities are EL's)
+struct ElBindings {                 // G
+    std::uint32_t valid = 0;
+    Input kb[cmd::Count][2]{}, pad[cmd::Count][2]{};
+    Input kb_move[4][2]{};          // up, down, left, right
+    bool operator==(const ElBindings&) const = default;
+};
+
+struct PadState {                   // XINPUT_GAMEPAD layout values
+    std::uint32_t connected = 0;
+    std::uint16_t buttons = 0;
+    std::uint8_t lt = 0, rt = 0;
+    std::int16_t lx = 0, ly = 0, rx = 0, ry = 0;
+};
+
 struct InputFrame {                 // H
     float x = 0.0f, y = 0.0f;
-    std::uint32_t raw = 0;          // held cmd bits
+    std::uint32_t raw = 0;          // held cmd bits (Ctx::Gameplay only)
     std::uint32_t tap_seq[16]{};    // rising-edge counters per cmd
+    std::uint32_t menu = 0;         // held menu:: intents from the keyboard (Ctx::LilyMenu only)
+    PadState pad{};                 // the pad for EL's native pad UI (Ctx::LilyMenu only; Start / Back removed)
+    std::uint64_t keys[4]{};        // every held key, only while EL waits for a key to bind (GuestStatus::selecting_key)
 };
 
 struct HostFlags {                  // H
@@ -142,6 +186,8 @@ struct FrameMeta {                  // G, published from Present
 struct GuestStatus {                // G
     std::uint32_t ready = 0;        // Lily pawn valid and stage anchored
     std::uint32_t menu_open = 0;    // an EL navigable menu is on screen
+    std::uint32_t selecting_key = 0; // EL's key binding page waits for a key: the Host sends raw keys, not intents
+    std::uint32_t binding_page = 0;  // EL's key binding page on screen: 1 keyboard, 2 gamepad
     float half_height = 0.0f, radius = 0.0f; // live EL capsule
     double frame_dt_p95 = 0.0;      // seconds, drives the pose sampling delay
 };
@@ -165,6 +211,15 @@ struct HostCounters {
     std::uint32_t hit_events_applied = 0, enemy_damage_calls = 0;
 };
 
+// EM's live UI keys (EM's settings can remap them), so EL's menus are bound to the same physical keys: the Guest
+// overrides EL's UI bindings to these FKey names and presses `vk` for each keyboard menu:: intent.
+struct UiLayout {                   // H
+    std::uint32_t valid = 0;
+    std::uint8_t vk[menu::Count]{};  // key the Guest posts to EL (EL's own arrows for navigation)
+    char kb[menu::Count][24]{};      // FKey names, "" = leave EL's binding
+    char pad[menu::Count][32]{};
+};
+
 struct Control {
     std::uint32_t magic = 0, protocol = 0;
 
@@ -179,11 +234,16 @@ struct Control {
     Seqlock<InputFrame> input;
     Seqlock<RebaseRequest> rebase;
     Seqlock<HostCounters> host_counters;
+    Seqlock<UiLayout> ui_layout;
+    // Lily bindings dropped because EM keeps the key (input::conflict_bit per row); the Guest tints those rows of
+    // EL's key binding pages so the conflict shows where the key is set
+    std::atomic<std::uint32_t> conflicts_kb{0}, conflicts_pad{0};
 
     // ---- Guest -> Host ----
     std::atomic<std::uint64_t> guest_tick_ms{0};
     std::atomic<std::uint32_t> guest_pid{0};
     Seqlock<GuestStatus> guest_status;
+    Seqlock<ElBindings> el_bindings;
     Seqlock<MapState> map;
     PoseRing pose;
     Seqlock<Vitals> vitals;

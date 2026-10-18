@@ -117,7 +117,7 @@ public:
             },
             opts));
         callbacks_.push_back(Hook::RegisterProcessEventPostCallback(
-            [](auto&, UObject* ctx, UFunction* fn, void*) { guarded(L"ProcessEvent.post", [&] { lie::guest::on_process_event_post(ctx, fn); }); },
+            [](auto&, UObject* ctx, UFunction* fn, void* parms) { guarded(L"ProcessEvent.post", [&] { lie::guest::on_process_event_post(ctx, fn, parms); }); },
             opts));
         lie::log::info(L"armed (EXE %hs verified)", g_bound->exe_sha256.c_str());
     }

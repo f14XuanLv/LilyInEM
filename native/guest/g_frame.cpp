@@ -4,6 +4,7 @@
 
 #include "guest/guest.h"
 
+#include "core/input_map.h"
 #include "rt/clock.h"
 #include "rt/d3d.h"
 #include "rt/hook.h"
@@ -177,39 +178,49 @@ bool verify_capture_rt() {
     return covered;
 }
 
-// EL UIInputSettingsData: VALIDATION=Enter, CANCEL=Escape, CONTEXT=C, PREVIOUS=A, NEXT=D [CUE4P SaveSettings]
-constexpr UINT kMenuKeys[9] = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_RETURN, VK_ESCAPE, 'C', 'A', 'D'};
+void post_key(HWND hwnd, WPARAM key, bool down) {
+    PostMessageW(hwnd, down ? WM_KEYDOWN : WM_KEYUP, key, down ? 0 : (1u << 30) | (1u << 31));
+}
 
+// Host menu intents (EM's UI keys) -> the same key pressed into EL (Control::ui_layout; the Guest binds EL's UI to
+// those keys, so prompts match). While EL's key binding page waits for a key, the Host sends every held key
+// instead (InputFrame::keys) and they go in as they are. The pad goes through the XInput detour (g_input.cpp).
 void forward_menu_keys(HWND hwnd) {
     static std::uint32_t prev = 0;
+    static std::uint64_t prev_keys[4]{};
     static bool activated = false;
     Control* c = shm::control();
     InputFrame in{};
     const bool menu = c && host_ctx() == Ctx::LilyMenu && c->input.read(in);
     std::uint32_t cur = 0;
+    std::uint64_t keys[4]{};
     if (menu) {
         if (!activated) {
             SendMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0);
             activated = true;
         }
-        auto held = [&](int k) { return (in.raw & (1u << k)) != 0; };
-        if (in.y > 0.5f) cur |= 1u << 0;
-        if (in.y < -0.5f) cur |= 1u << 1;
-        if (in.x < -0.5f) cur |= 1u << 2;
-        if (in.x > 0.5f) cur |= 1u << 3;
-        if (held(cmd::Jump)) cur |= 1u << 4;
-        if (held(cmd::Dodge) || held(cmd::Sub2)) cur |= 1u << 5;
-        if (held(cmd::Attack) || held(cmd::Sub1)) cur |= 1u << 6;
-        if (held(cmd::Heal)) cur |= 1u << 7;
-        if (held(cmd::SummonSwitch)) cur |= 1u << 8;
+        cur = in.menu;
+        std::memcpy(keys, in.keys, sizeof(keys));
     } else {
         activated = false;
     }
+    for (int w = 0; w < 4; ++w) {
+        const std::uint64_t diff = keys[w] ^ prev_keys[w];
+        for (int b = 0; diff && b < 64; ++b) {
+            const int vk = w * 64 + b;
+            if ((diff >> b & 1u) && vk >= 0x08) post_key(hwnd, static_cast<WPARAM>(vk), (keys[w] >> b & 1u) != 0);
+        }
+        prev_keys[w] = keys[w];
+    }
     const std::uint32_t pressed = cur & ~prev, released = prev & ~cur;
     prev = cur;
-    for (int k = 0; k < 9; ++k) {
-        if (pressed & (1u << k)) PostMessageW(hwnd, WM_KEYDOWN, kMenuKeys[k], 0);
-        if (released & (1u << k)) PostMessageW(hwnd, WM_KEYUP, kMenuKeys[k], (1u << 30) | (1u << 31));
+    if (!pressed && !released) return;
+    UiLayout l{};
+    const bool live = c && c->ui_layout.read(l) && l.valid;
+    for (int k = 0; k < menu::Count; ++k) {
+        const auto key = static_cast<WPARAM>(live && l.vk[k] ? l.vk[k] : input::kElMenuVkDefault[k]);
+        if (pressed & (1u << k)) post_key(hwnd, key, true);
+        if (released & (1u << k)) post_key(hwnd, key, false);
     }
 }
 

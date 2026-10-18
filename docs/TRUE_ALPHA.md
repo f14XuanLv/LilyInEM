@@ -78,7 +78,7 @@
 
 ## 5. 验证
 
-1. 日志三连（全绿才算通）：guest `scene capture armed (1280x720)`、`capture RT texture grabbed (format 10)`、host `scene-capture alpha channel open`。
+1. 日志三连（全绿才算通）：guest `scene capture armed (<WxH>)`、`capture RT texture grabbed (format 10)`、host `scene-capture alpha channel open`。默认档 EM 1920×1080 × `ResScale` 5/3 → `armed (3200x1800)`；尺寸随 `guest_res_w/h` 变。
 2. `verify_capture_rt` 无 drop 日志。
 3. 截图：暗部实心（s5000 黑骑士盔甲、莉莉裙摆阴影）、特效正常叠加、Split/开合菜单无残留。
 

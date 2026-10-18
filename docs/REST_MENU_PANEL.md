@@ -6,9 +6,9 @@
 
 ## 1. 正常透传路径（回顾）
 
-Guest 在无头"黑摄影棚"里渲染 EL，Present 时把 backbuffer 拷进 DXGI 共享纹理；Host `ps_menu`/`ps_world` 对每个像素按亮度抠 alpha，再以 `ONE / INV_SRC_ALPHA` 预乘混合到 EM 世界上。
+Guest 在无头"黑摄影棚"里渲染 EL，Present 时把 backbuffer 拷进 DXGI 共享纹理交给 Host。（2026-10-19 起：世界层由 `USceneCaptureComponent2D` 的真 alpha 取代亮度抠像，见 `docs\TRUE_ALPHA.md`；菜单层仍按亮度抠 alpha。）Host `ps_menu`/`ps_world` 对每个像素求 alpha 后以 `ONE / INV_SRC_ALPHA` 预乘混合到 EM 世界上。
 
-这个管线成立的前提：一个像素只要有可见贡献，它的预乘 RGB 就非零，alpha 可由亮度近似。
+亮度抠像成立的前提：一个像素只要有可见贡献，它的预乘 RGB 就非零，alpha 可由亮度近似。
 
 ## 2. 背板为什么透传不出来
 

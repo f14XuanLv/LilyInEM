@@ -25,9 +25,15 @@ struct Scripted {
     float x = 0.0f, y = 0.0f;
     std::uint32_t held = 0, taps = 0;
     int frames = 0;
+    std::uint32_t menu = 0;
+    int menu_frames = 0;
 } g_script;
 
-bool down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+struct Layout {
+    std::mutex m;
+    Bindings b{}; // until the Guest has published EL's bindings, Lily only moves with the pad
+    UiKeys u = em_default_ui_keys();
+} g_layout;
 
 XInputGetStateFn resolve() {
     for (const char* dll : {"xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"}) {
@@ -41,9 +47,6 @@ XInputGetStateFn resolve() {
 }
 
 constexpr std::uint32_t bit(int c) { return 1u << c; }
-
-// [POLICY] stick dead zone matching XInput's recommended left-thumb dead zone (7849 / 32767)
-constexpr float kDeadZone = 7849.0f / 32767.0f;
 
 } // namespace
 
@@ -64,12 +67,38 @@ Pad read_pad() {
     XINPUT_STATE st{};
     if (!f || f(0, &st) != ERROR_SUCCESS) return p;
     p.connected = true;
-    p.lx = std::clamp(st.Gamepad.sThumbLX / 32767.0f, -1.0f, 1.0f);
-    p.ly = std::clamp(st.Gamepad.sThumbLY / 32767.0f, -1.0f, 1.0f);
     p.buttons = st.Gamepad.wButtons;
     p.lt = st.Gamepad.bLeftTrigger;
     p.rt = st.Gamepad.bRightTrigger;
+    p.lx = st.Gamepad.sThumbLX;
+    p.ly = st.Gamepad.sThumbLY;
+    p.rx = st.Gamepad.sThumbRX;
+    p.ry = st.Gamepad.sThumbRY;
     return p;
+}
+
+Devices read_devices() {
+    Devices d;
+    for (int k = 0x01; k < 0xFF; ++k) { // incl. mouse buttons: EM may bind actions to them
+        if (k == 0x03) continue;        // VK_CANCEL
+        if (GetAsyncKeyState(k) & 0x8000) d.keys.set(k);
+    }
+    d.pad = read_pad();
+    return d;
+}
+
+void set_layout(const Bindings& b, const UiKeys& u) {
+    std::scoped_lock lk(g_layout.m);
+    g_layout.b = b;
+    g_layout.u = u;
+}
+Bindings bindings() {
+    std::scoped_lock lk(g_layout.m);
+    return g_layout.b;
+}
+UiKeys ui_keys() {
+    std::scoped_lock lk(g_layout.m);
+    return g_layout.u;
 }
 
 void script(float x, float y, std::uint32_t held, std::uint32_t taps, int frames) {
@@ -81,56 +110,45 @@ void script(float x, float y, std::uint32_t held, std::uint32_t taps, int frames
     g_script.frames = std::max(frames, 1);
 }
 
-void FrameBuilder::build(InputFrame& out, bool devices) {
-    float x = 0.0f, y = 0.0f;
-    std::uint32_t raw = 0, taps = 0;
-    if (devices) {
-        const Pad pad = read_pad();
-        if (pad.connected) {
-            if (std::hypot(pad.lx, pad.ly) > kDeadZone) x = pad.lx, y = pad.ly;
-            const int dx = ((pad.buttons & XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : 0) - ((pad.buttons & XINPUT_GAMEPAD_DPAD_LEFT) ? 1 : 0);
-            const int dy = ((pad.buttons & XINPUT_GAMEPAD_DPAD_UP) ? 1 : 0) - ((pad.buttons & XINPUT_GAMEPAD_DPAD_DOWN) ? 1 : 0);
-            if (dx || dy) x = static_cast<float>(dx), y = static_cast<float>(dy);
-            if (pad.buttons & XINPUT_GAMEPAD_A) raw |= bit(cmd::Jump);
-            if (pad.buttons & XINPUT_GAMEPAD_X) raw |= bit(cmd::Attack);
-            if (pad.buttons & XINPUT_GAMEPAD_Y) raw |= bit(cmd::Sub1);
-            if (pad.buttons & XINPUT_GAMEPAD_B) raw |= bit(cmd::Sub2);
-            if (pad.buttons & XINPUT_GAMEPAD_RIGHT_SHOULDER) raw |= bit(cmd::SummonSwitch);
-            if (pad.buttons & XINPUT_GAMEPAD_LEFT_SHOULDER) raw |= bit(cmd::Heal);
-            if (pad.rt > XINPUT_GAMEPAD_TRIGGER_THRESHOLD) raw |= bit(cmd::Dodge);
-            if (pad.lt > XINPUT_GAMEPAD_TRIGGER_THRESHOLD) raw |= bit(cmd::Hook) | bit(cmd::Interact); // EM IA_Interact = LT
-        }
-        const int kx = (down('D') ? 1 : 0) - (down('A') ? 1 : 0);
-        const int ky = (down('W') ? 1 : 0) - (down('S') ? 1 : 0);
-        if (kx || ky) x = static_cast<float>(kx), y = static_cast<float>(ky);
-        if (down(VK_SPACE) || down('Z')) raw |= bit(cmd::Jump);
-        if (down(VK_LSHIFT) || down('C')) raw |= bit(cmd::Dodge);
-        if (down('H') || down('X')) raw |= bit(cmd::Attack);
-        if (down('J')) raw |= bit(cmd::Sub1);
-        if (down('K')) raw |= bit(cmd::Sub2);
-        if (down('L')) raw |= bit(cmd::SummonSwitch);
-        if (down('Q')) raw |= bit(cmd::Heal);
-        if (down('E')) raw |= bit(cmd::Hook) | bit(cmd::Interact); // EM IA_Interact = E
-    }
+void script_menu(std::uint32_t held, int frames) {
+    std::scoped_lock lk(g_script.m);
+    g_script.menu = held & ((1u << menu::Count) - 1);
+    g_script.menu_frames = std::max(frames, 1);
+}
+
+void FrameBuilder::build(InputFrame& out, const Devices* d) {
+    Actions a;
+    std::uint32_t taps = 0;
+    if (d) a = lily_actions(*d, bindings());
     {
         std::scoped_lock lk(g_script.m);
         if (g_script.frames > 0) {
-            if (std::abs(g_script.x) > 0.001f || std::abs(g_script.y) > 0.001f) x = g_script.x, y = g_script.y;
-            raw |= g_script.held;
+            if (std::abs(g_script.x) > 0.001f || std::abs(g_script.y) > 0.001f) a.x = g_script.x, a.y = g_script.y;
+            a.raw |= g_script.held;
             taps |= g_script.taps;
             g_script.taps = 0;
             if (--g_script.frames == 0) g_script.held = 0, g_script.x = g_script.y = 0.0f;
         }
     }
-    raw &= cmd::Mask;
-    const std::uint32_t rising = (raw & ~prev_raw_) | taps;
-    prev_raw_ = raw;
-    out.x = x;
-    out.y = y;
-    out.raw = raw;
+    a.raw &= cmd::Mask;
+    const std::uint32_t rising = (a.raw & ~prev_raw_) | taps;
+    prev_raw_ = a.raw;
+    out.x = std::clamp(a.x, -1.0f, 1.0f);
+    out.y = std::clamp(a.y, -1.0f, 1.0f);
+    out.raw = a.raw;
     for (int c = 1; c < cmd::Count; ++c) {
         if (rising & bit(c)) ++out.tap_seq[c];
     }
+}
+
+std::uint32_t build_menu(const Devices* d) {
+    std::uint32_t m = d ? menu_bits(d->keys, ui_keys()) : 0u;
+    std::scoped_lock lk(g_script.m);
+    if (g_script.menu_frames > 0) {
+        m |= g_script.menu;
+        if (--g_script.menu_frames == 0) g_script.menu = 0;
+    }
+    return m;
 }
 
 } // namespace lie::input
