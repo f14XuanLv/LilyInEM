@@ -109,7 +109,11 @@
 
   `Settings` 内部细分（按游戏业务判断，未逐页验证 `WBP_Settings` 结构）：
   - 不需接管：EL 的**键位设置**——莉莉的操作键由 Host 按 EM 键位映射成命令位注入，EL 的键位不参与游戏操作；但 EL 菜单键（Enter/Esc/C/A/D）由 Guest 以固定虚拟键转发，改 EL 的 UI 键位会让转发失效，因此建议**隐藏或锁定**这一页，而不是交给 EM。
-  - 需接管或屏蔽：**画面设置**（分辨率 / 窗口模式 / 帧率等）——EL 是无头 1280×720 导出窗口，改了会破坏帧导出；应隐藏，画面以 EM 为准。
+  - [x] 需接管或屏蔽：**画面设置**（分辨率 / 窗口模式 / 帧率等）——EL 导出窗口尺寸由 Host 推送（EM × `ResScale`），改了会破坏帧导出；画面以 EM 为准。（2026-10-19 已移除）
+    - 设置页显示 `1024×768` 是控件兜底：实际 3200×1800 不在受支持分辨率列表里；`ResetToDefault` 才会真的写 1024×768。
+    - `WBP_Settings_C` 页签寻址（menuprobe `--funcs` 读字节码）：`SelectTab(i)` 遍历 `TabArray` 设 `SetSelected` 并 `SettingsSwitcher.SetActiveWidgetIndex(i)`；`GoToSideTab` = `(CurrTabIndex ± 1) mod TabArray.Length`。只 Collapse 页签会留空页；只删 switcher 页会让后面的页内容错位一格。
+    - 做法照抄 EL 自己的非 PC 分支（`SetupSettings` 里 `IsPCBuild` 为假时）：Construct 后 `GraphicsTab` / `WBP_Settings_Graphics` `RemoveFromParent`，并从 `TabArray` 删掉该项（`g_body.cpp` post-Construct）。实测正反循环 游戏→声音→控制器→键盘 回绕正确，关闭重开幂等。Apply / Reset / 分辨率 / 模式 / 缩放五个处理器仍在 `kBlockedScoped` 里兜底。
+    - 遗留：页签的鼠标点击处理器用常量 `SelectTab(3/4)`（控制器 / 键盘），移除后索引应为 2/3。Host 不向 EL 转发鼠标，目前不可触发；以后转发鼠标时要重映射。
   - 需同步：**音量**（EL 的 BGM / 环境音已被静音，莉莉的音效仍走 EL 音量）、**语言**（EL 菜单文字）——建议跟随 EM 的设置，而不是两边各自设置。
   - 待定：伤害数字 / HUD 显示等 EL 游戏性选项（EL HUD 已关闭，大多无效果）。
 - [ ] 直开菜单 `MenuKind::Spirits/Relics/Strengthen` 现仅 debug `menu2/3/4` 使用；`MenuKind::Rest` 已改为直接创建，不再依赖 EL 地图里的 `BP_Interactable_RestingPoint_C`。

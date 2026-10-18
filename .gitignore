@@ -8,4 +8,4 @@ devconfig.local.json
 tools/*/bin/
 tools/*/obj/
 tools/menuprobe/out/
-tools/menuprobe/Detex.dll
+Detex.dll

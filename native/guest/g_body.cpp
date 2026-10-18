@@ -56,6 +56,20 @@ constexpr const wchar_t* kBlockedHandlers[] = {
     L"OnApplicationWillDeactivate",
     L"TriggerOrDeferPause",
 };
+// Scoped to one widget class: these generated handler names are not globally unique (other widgets
+// bind members named WBP_DefaultButton etc. the same way). WBP_Settings_Graphics (F5 -> settings):
+// EM owns video settings; EL's window is a fixed off-screen render target the Host scales, so nothing
+// on this page may commit. Option changes only stage values — Apply / Reset write back.
+constexpr struct {
+    const wchar_t* fn;
+    const wchar_t* cls;
+} kBlockedScoped[] = {
+    {L"BndEvt__WBP_DefaultButton_K2Node_ComponentBoundEvent_0_OnClicked__DelegateSignature", L"WBP_Settings_Graphics_C"},                        // 套用新设定
+    {L"BndEvt__WBP_Settings_Graphics_WBP_DefaultButton_ResetToDefault_K2Node_ComponentBoundEvent_9_OnClicked__DelegateSignature", L"WBP_Settings_Graphics_C"}, // reset -> 1024x768
+    {L"BndEvt__Resolution_K2Node_ComponentBoundEvent_5_OnOptionChanged__DelegateSignature", L"WBP_Settings_Graphics_C"},
+    {L"BndEvt__DisplayMode_K2Node_ComponentBoundEvent_2_OnOptionChanged__DelegateSignature", L"WBP_Settings_Graphics_C"},
+    {L"BndEvt__WBP_Settings_Graphics_ResolutionScale_K2Node_ComponentBoundEvent_8_OnValueChanged__DelegateSignature", L"WBP_Settings_Graphics_C"},
+};
 // Fast travel is EM's: the entry stays (always enabled) and opens EM's fast-travel map instead of EL's
 constexpr const wchar_t* kTravelHandler = L"BndEvt__RestButton_Map_K2Node_ComponentBoundEvent_0_OnClicked__DelegateSignature";
 constexpr const wchar_t* kRestMenu = L"WBP_RestMenu_C";
@@ -106,6 +120,7 @@ struct State {
     float foot_u = 0.5f, foot_v = 0.5f, view_w = 0.0f, view_h = 0.0f; // last projection
     RC::Unreal::FName fn_construct{}, fn_destruct{}, fn_travel{};
     std::vector<RC::Unreal::FName> blocked;
+    std::vector<std::pair<RC::Unreal::FName, std::wstring>> blocked_scoped;
     bool names = false;
     Vitals vitals{};
 } g;
@@ -653,6 +668,7 @@ void tick() {
         g.fn_destruct = ue::fname(L"Destruct");
         g.fn_travel = ue::fname(kTravelHandler);
         for (const wchar_t* h : kBlockedHandlers) g.blocked.push_back(ue::fname(h));
+        for (const auto& h : kBlockedScoped) g.blocked_scoped.emplace_back(ue::fname(h.fn), h.cls);
         g.names = true;
     }
     c->guest_pid.store(GetCurrentProcessId());
@@ -671,11 +687,26 @@ void tick() {
     if (g.res_poll.due(now)) {
         const std::uint32_t rw = c->guest_res_w.load(), rh = c->guest_res_h.load();
         unsigned cur_w = 0, cur_h = 0;
-        if (rw >= 64 && rh >= 64 && frame_dims(cur_w, cur_h) && (rw != cur_w || rh != cur_h)) {
-            request_frame_size(rw, rh);
-            if (rw != g.res_w || rh != g.res_h) log::info(L"guest res -> %ux%u (window resize)", rw, rh);
-            g.res_w = rw;
-            g.res_h = rh;
+        if (rw >= 64 && rh >= 64 && frame_dims(cur_w, cur_h)) {
+            if (rw != cur_w || rh != cur_h) request_frame_size(rw, rh);
+            // The window is resized raw, so GameUserSettings keeps its defaults (FullscreenMode=1
+            // "borderless" + DesktopResolution) and EL's settings page lies; the engine also rewrites
+            // FullscreenMode once the resize lands. Idempotent field sync wins either way.
+            if (UObject* gs = ue::first(L"GameUserSettings")) {
+                for (const wchar_t* n : {L"ScreenResolution", L"LastConfirmedScreenResolution"}) {
+                    if (auto* p = static_cast<std::int32_t*>(ue::field_ptr(gs, n))) {
+                        p[0] = static_cast<std::int32_t>(rw);
+                        p[1] = static_cast<std::int32_t>(rh);
+                    }
+                }
+                ue::set_num(gs, L"FullscreenMode", 2); // windowed: -windowed launch + off-screen window
+                ue::set_num(gs, L"LastConfirmedFullscreenMode", 2);
+            }
+            if (rw != g.res_w || rh != g.res_h) {
+                log::info(L"guest res -> %ux%u (window resize)", rw, rh);
+                g.res_w = rw;
+                g.res_h = rh;
+            }
         }
     }
     UObject* pawn = pc ? ue::obj(pc, L"Pawn") : nullptr;
@@ -804,6 +835,12 @@ bool on_process_event_pre(UObject* ctx, ue::UFunction* fn) {
             return true;
         }
     }
+    for (const auto& h : g.blocked_scoped) {
+        if (n == h.first && ue::class_name(ctx) == h.second) {
+            log::info(L"blocked %s on %s", fn->GetName().c_str(), h.second.c_str());
+            return true;
+        }
+    }
     return false;
 }
 
@@ -813,6 +850,28 @@ void on_process_event_post(UObject* ctx, ue::UFunction* fn) {
     const bool construct = n == g.fn_construct;
     if (!construct && n != g.fn_destruct) return;
     const std::wstring cls = ue::class_name(ctx);
+    if (construct && cls == L"WBP_Settings_C") {
+        // The graphics tab lies in Lily mode (the export size is not a desktop mode) and its Apply /
+        // Reset handlers are blocked. Pop it the way EL's own non-PC branch of SetupSettings does:
+        // tab + page RemoveFromParent and drop the tab from TabArray, which SelectTab / GoToSideTab
+        // index (wrap over TabArray.Length, switcher index == TabArray index). No blank page.
+        UObject* tab = ue::obj(ctx, L"GraphicsTab");
+        auto* arr = static_cast<ue::RawArray*>(ue::field_ptr(ctx, L"TabArray"));
+        if (tab && arr && arr->data) {
+            auto** items = static_cast<UObject**>(arr->data);
+            for (std::int32_t i = 0; i < arr->num; ++i) {
+                if (items[i] != tab) continue;
+                std::memmove(items + i, items + i + 1, sizeof(UObject*) * (arr->num - i - 1));
+                --arr->num;
+                Call(tab, L"RemoveFromParent").go();
+                if (UObject* page = ue::obj(ctx, L"WBP_Settings_Graphics")) Call(page, L"RemoveFromParent").go();
+                auto cur = static_cast<std::int32_t>(ue::num(ctx, L"CurrTabIndex"));
+                if (cur > i || cur >= arr->num) cur = cur >= arr->num ? 0 : cur - 1;
+                Call(ctx, L"SelectTab").i(cur).go();
+                break;
+            }
+        }
+    }
     bool menu = false;
     for (const wchar_t* m : kMenuClasses) menu = menu || cls == m;
     if (!menu) return;

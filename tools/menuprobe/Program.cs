@@ -29,9 +29,22 @@ if (options.TryGetValue("find", out var needle))
     return 0;
 }
 
+// Blueprint function bytecode as JSON: --funcs <package path> [--only Name1,Name2]
+if (options.TryGetValue("funcs", out var funcPkg))
+{
+    provider.ReadScriptData = true;
+    var only = options.GetValueOrDefault("only")?.Split(',').ToHashSet();
+    var pkg = provider.LoadPackage(funcPkg) ?? throw new InvalidOperationException("pkg");
+    foreach (var e in pkg.GetExports())
+        if (e is UFunction f && (only == null || only.Contains(f.Name)))
+            Console.WriteLine($"==== {f.Name}\n{Newtonsoft.Json.JsonConvert.SerializeObject(f.ScriptBytecode, Newtonsoft.Json.Formatting.Indented)}");
+    return 0;
+}
+
 // BC7 atlases decode through the bundled Detex native lib (extracted next to the exe)
-CUE4Parse_Conversion.Textures.BC.DetexHelper.LoadDll();
-CUE4Parse_Conversion.Textures.BC.DetexHelper.Initialize(CUE4Parse_Conversion.Textures.BC.DetexHelper.DLL_NAME);
+var detex = Path.Combine(AppContext.BaseDirectory, CUE4Parse_Conversion.Textures.BC.DetexHelper.DLL_NAME);
+CUE4Parse_Conversion.Textures.BC.DetexHelper.LoadDll(detex);
+CUE4Parse_Conversion.Textures.BC.DetexHelper.Initialize(detex);
 
 // Widget tree of WBP_RestMenu: dump every export (name/class/outer) plus the layout fields we care about
 // (CanvasPanelSlot Offsets/Anchors/Alignment/AutoSize/ZOrder, widget Visibility, Image brush resource).
