@@ -23,7 +23,7 @@ void local_input(float x, float y, std::uint32_t held, std::uint32_t taps, int f
 // ---- g_frame.cpp: Present export (render thread) ----
 void arm_present();
 void stage_frame(float foot_u, float foot_v, float view_w_uu, float view_h_uu); // game thread -> next Present
-void stage_menu(FrameKind kind, const float split[4]);                          // how the next Presents are composited
+void stage_menu(FrameKind kind, const float split[4], float menu_alpha);        // how the next Presents are composited
 void* window();
 void shutdown_frame();
 

@@ -132,6 +132,7 @@ struct FrameMeta {                  // G, published from Present
     std::uint64_t frame_seq = 0;
     std::uint32_t menu_frame = 0;   // FrameKind: what the Host takes from this frame
     float split[4]{};               // FrameKind::Split: world rect (u0, v0, u1, v1) in frame UV
+    float menu_alpha = 1.0f;        // visible menu's ColorAndOpacity.A (Show/Close/HideUI animate it)
 };
 
 struct GuestStatus {                // G

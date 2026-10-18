@@ -80,11 +80,11 @@
   - 休息期间 EL 相机 `WorldSpaceLocationOffset.Y = -280`，莉莉与英灵位于画面右侧（UV≈0.47–0.97），`FrameKind::Split` 的世界矩形 = 莉莉脚底左 330 / 右 540 / 上 430 / 下 40 UU；英灵位置取自 EL 休息点 `SpiritLocation_1..3`（-170 / +170 / +340 UU，播 `rest` 动画 track 9）。
   - 全屏子菜单（技能 / 遗物 / 强化）与 Esc 菜单按 EL 原样**不透明**显示（`FrameKind::Menu`，EM 世界被遮住，莉莉在世界层停在最后一帧）。
 
-- [ ] **EL 休息菜单左侧黑色背景：当前是自定数值，不是 EL 原值**（2026-10-18）
-  - 现状：Guest 把 EL 的 `BG` 控件 Collapsed（它在 EL 帧里是“黑叠黑”，无法从单帧取 alpha），Host `ps_menu` 在 Split 模式下自己画一个面板：`alpha = 0.85 * smoothstep(0.46, 0.28, u)`（u = 屏幕横向 0..1，即左侧约 28% 不透明度 0.85，到约 46% 渐隐为 0）。**0.85 / 0.28 / 0.46 都是目测设定**，没有对照 EL 原画面校准。
-  - 已探索（CUE4Parse，未落地到代码）：EL `WBP_RestMenu` 的 `BG` 是 `Image`，Brush = PaperSprite `T_Menu_RestPointTitle_Bg`（Atlas-Game 图集，源区域 800×8，`DrawAs = Box`，Margin 上下 0.25），所在 `CanvasPanelSlot_4`：Anchors 左边缘竖向拉满（Min (0,0) / Max (0,1)），Offsets Right = 800、`bAutoSize`。即“贴左边、全屏高、设计宽 800 px 的横向贴图条”。
-  - 未探索：该贴图条的逐像素 alpha 渐变曲线、EL UI 的 DPI 缩放（设计分辨率 → 1280×720 时 800 px 对应的屏幕比例）、`Show` / `HideUI` 动画对 BG 透明度的影响。
-  - 后续可选做法：① 按上述贴图 + 锚点 + DPI 精确复刻渐变（读出图集 800×8 区域的 alpha 曲线）；② 让 EL 的 `BG` 保持可见，用“背景板 + 双背景”求得真实 alpha（见上一条的画面专项）。
+- [x] **EL 休息菜单左侧黑色背景：已按 EL 原值复刻**（2026-10-19，详见 `docs\REST_MENU_PANEL.md`）
+  - 已落地：`ps_menu` 从提取的图集 alpha 精确重放两块黑叠黑的背板——`BG`（`T_Menu_RestPointTitle_Bg`，800 设计像素宽、全屏高、alpha 0.8 平台到 x=480、x=791 渐隐到 0）和页脚横条（`T_Menu_Footer_Bg`，底部 128 设计像素高、0→0.30 纵向渐变）。LUT 在 `native/host/rest_panel_alpha.h`（menuprobe 生成），800×2 R8 纹理 t1。
+  - UI 缩放按 EL `ScaleToFit`（min(w/1920, h/1080)）由实际帧尺寸推导：1280×720 时面板物理宽 533 px、横条高 85 px。
+  - `Show`/`Close`/`HideUI` 动画驱动根控件 `ColorAndOpacity.A`，Guest 每帧发布为 `FrameMeta::menu_alpha`，Host 用它乘背板 alpha（面板随菜单淡入淡出）。
+  - `BG` 保持 Collapsed 不变：它在帧里黑叠黑无法取 alpha，Host 侧合成（面板在内容之下，over 合成 `a = key + dim*(1-key)`）。
 
 ### 菜单 / 系统
 - [x] （2026-10-18）**EM 长椅 → EL 休息菜单**

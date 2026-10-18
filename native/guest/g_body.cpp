@@ -210,7 +210,7 @@ void reset_anchor() {
     g.menus.clear();
     g.frame_kind = FrameKind::World;
     const float none[4]{};
-    stage_menu(FrameKind::World, none);
+    stage_menu(FrameKind::World, none, 1.0f);
     g.map = {};
     stage_reset();
     terrain_reset();
@@ -316,7 +316,19 @@ void publish_frame_kind(UObject* pc, UObject* pawn, FrameKind kind) {
         split[2] = g.foot_u + static_cast<float>(kSplitRight) / g.view_w;
         split[3] = g.foot_v + static_cast<float>(kSplitDown) / g.view_h;
     }
-    stage_menu(kind, split);
+    // WBP_*_INST animate the root widget's ColorAndOpacity; the Host needs it because the collapsed BG
+    // means the rest menu's own dimming is synthesized rather than keyed out of the frame
+    float alpha = 1.0f;
+    if (kind != FrameKind::World) {
+        for (const ue::Weak& w : g.menus) {
+            UObject* m = w.get();
+            if (m && m != g.dormant.get()) {
+                if (const float* c = ue::field<float>(m, L"ColorAndOpacity")) alpha = c[3];
+                break;
+            }
+        }
+    }
+    stage_menu(kind, split, alpha);
 }
 
 UObject* active_child(UObject* menu, const wchar_t* switcher) { return ue::call_obj(ue::obj(menu, switcher), L"GetActiveWidget"); }

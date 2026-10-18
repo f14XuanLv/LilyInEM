@@ -42,6 +42,7 @@ struct Staged {
     bool valid = false;
     FrameKind kind = FrameKind::World;
     float split[4]{};
+    float menu_alpha = 1.0f;
     float foot_u = 0.5f, foot_v = 0.5f, view_w = 0.0f, view_h = 0.0f;
 } g_staged;
 
@@ -140,6 +141,7 @@ HRESULT STDMETHODCALLTYPE on_present(IDXGISwapChain* swap, UINT sync, UINT flags
                     std::scoped_lock sl(g_staged.m);
                     meta.menu_frame = static_cast<std::uint32_t>(g_staged.kind);
                     std::memcpy(meta.split, g_staged.split, sizeof(meta.split));
+                    meta.menu_alpha = g_staged.menu_alpha;
                     if (g_staged.valid) {
                         meta.foot_u = g_staged.foot_u;
                         meta.foot_v = g_staged.foot_v;
@@ -189,10 +191,11 @@ void stage_frame(float foot_u, float foot_v, float view_w_uu, float view_h_uu) {
     g_staged.view_h = view_h_uu;
 }
 
-void stage_menu(FrameKind kind, const float split[4]) {
+void stage_menu(FrameKind kind, const float split[4], float menu_alpha) {
     std::scoped_lock lk(g_staged.m);
     g_staged.kind = kind;
     std::memcpy(g_staged.split, split, sizeof(g_staged.split));
+    g_staged.menu_alpha = menu_alpha;
 }
 
 void* window() { return g_hwnd.load(); }

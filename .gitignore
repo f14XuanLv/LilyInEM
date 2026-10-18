@@ -3,3 +3,9 @@ build.*.log
 devconfig.local.json
 .vs/
 *.user
+
+# .NET dev tools (tools/*): build output, NuGet restore, probe dumps
+tools/*/bin/
+tools/*/obj/
+tools/menuprobe/out/
+tools/menuprobe/Detex.dll

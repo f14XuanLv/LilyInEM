@@ -7,6 +7,7 @@
 // - ImGui: F6 loadout panel, Lily HUD, F10 oracle panel, toasts
 
 #include "host/host.h"
+#include "host/rest_panel_alpha.h"
 
 #include "core/el_items.h"
 #include "core/facts.h"
@@ -43,8 +44,9 @@ namespace {
 //   straight colour rgb/alpha is composited with that alpha
 constexpr const char* kKeyHlsl = R"hlsl(
 Texture2D frame : register(t0);
+Texture2D panel_tex : register(t1); // kRestPanelAlpha: row 0 rest-menu BG, row 1 footer strip (design space)
 SamplerState samp : register(s0);
-cbuffer Key : register(b0) { float2 texel; float gain; float out_linear; float split_on; float3 pad; float4 split; };
+cbuffer Key : register(b0) { float2 texel; float gain; float out_linear; float split_on; float panel_u; float menu_alpha; float footer_v; float4 split; };
 bool in_split(float2 uv) { return split_on > 0.5 && all(uv >= split.xy) && all(uv <= split.zw); }
 float peak(float3 c) { return max(c.r, max(c.g, c.b)); }
 float3 px(float2 uv) { return frame.Sample(samp, uv).rgb; }
@@ -74,22 +76,26 @@ float4 ps_world(VSOut i) : SV_Target {
 // EL menus over EM, blended ONE / INV_SRC_ALPHA. Every frame is composited on its own (no per-frame state, so
 // nothing can flicker). Over the black studio the frame is the premultiplied UI; only its alpha is unknown.
 // - full-screen menus (Menu): shown exactly as EL draws them, opaque (their own backdrop covers the screen)
-// - rest menu (Split): EL's backdrop is a black panel over the left third that fades out to the right; it is
-//   black on black in the frame, so the panel is restored here and the rest (footer, cursor) is keyed
+// - rest menu (Split): EL's backdrop is the BG image - a 800 design px wide, full-height panel anchored
+//   left whose sprite alpha is 0.8 flat to x=480 then fades to 0 by x=791 - plus a 128 design px tall
+//   footer strip along the bottom. Both are black on black in the frame, so their alpha is restored
+//   from the extracted sprites (menu_alpha is the menu's own ColorAndOpacity fade); the rest is keyed
 float4 ps_menu(VSOut i) : SV_Target {
     if (in_split(i.uv)) discard;
     float3 c = frame.Sample(samp, i.uv).rgb;
     if (split_on < 0.5) return float4(c, 1.0);
-    float panel = 0.85 * smoothstep(0.46, 0.28, i.uv.x);
     float key = saturate(max(smoothstep(0.03, 0.09, peak(c)), peak(c)));
-    float a = max(panel, key);
+    float bg = panel_tex.Sample(samp, float2(i.uv.x / panel_u, 0.25)).r;
+    float ft = panel_tex.Sample(samp, float2((i.uv.y - footer_v) / max(1.0 - footer_v, 1e-5), 0.75)).r;
+    float dim = menu_alpha * (bg + ft * (1.0 - bg)); // the strip is drawn on top of the panel
+    float a = key + dim * (1.0 - key);              // both sit under the menu content
     return float4(min(c, a), a);
 }
 )hlsl";
 
 struct alignas(16) KeyCB {
     float texel_x, texel_y, gain, out_linear;
-    float split_on, pad0, pad1, pad2;
+    float split_on, panel_u, menu_alpha, footer_v;
     float split[4];
 };
 
@@ -131,6 +137,8 @@ struct Renderer {
     std::uint64_t opened = 0;
     ID3D11Texture2D* guest_tex = nullptr;
     ID3D11ShaderResourceView* guest_srv = nullptr;
+    ID3D11Texture2D* panel_tex = nullptr;
+    ID3D11ShaderResourceView* panel_srv = nullptr;
     UINT gw = 0, gh = 0;
     ImGuiContext* imgui = nullptr;
     input::FrameBuilder input;
@@ -230,6 +238,17 @@ bool init(IDXGISwapChain* swap) {
     sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sd.MaxLOD = D3D11_FLOAT32_MAX;
     g_r.dev->CreateSamplerState(&sd, &g_r.sampler);
+    D3D11_TEXTURE2D_DESC pd{};
+    pd.Width = kRestPanelAlphaW;
+    pd.Height = 2;
+    pd.MipLevels = pd.ArraySize = 1;
+    pd.Format = DXGI_FORMAT_R8_UNORM;
+    pd.SampleDesc.Count = 1;
+    pd.Usage = D3D11_USAGE_IMMUTABLE;
+    pd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA pinit[2] = {{kRestPanelAlpha[0], kRestPanelAlphaW, 0}, {kRestPanelAlpha[1], kRestPanelAlphaW, 0}};
+    if (SUCCEEDED(g_r.dev->CreateTexture2D(&pd, pinit, &g_r.panel_tex)))
+        g_r.dev->CreateShaderResourceView(g_r.panel_tex, nullptr, &g_r.panel_srv);
     D3D11_RASTERIZER_DESC rd{};
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
@@ -358,6 +377,7 @@ void blit(ID3D11RenderTargetView* target, UINT w, UINT h, ID3D11PixelShader* ps,
     c->PSSetShader(ps, nullptr, 0);
     c->PSSetConstantBuffers(0, 1, &g_r.cb);
     c->PSSetShaderResources(0, 1, &src);
+    c->PSSetShaderResources(1, 1, &g_r.panel_srv);
     c->PSSetSamplers(0, 1, &g_r.sampler);
     c->Draw(3, 0);
     ID3D11ShaderResourceView* none = nullptr;
@@ -580,6 +600,11 @@ void render_frame(IDXGISwapChain* swap) {
         if (kind == FrameKind::Split) {
             cb.split_on = 1.0f;
             std::memcpy(cb.split, fm.split, sizeof(cb.split));
+            // EL UI is ScaleToFit on a 1920x1080 design: BG is 800 design px wide, the footer strip 128 tall
+            const float ui = std::min(fm.width / 1920.0f, fm.height / 1080.0f);
+            cb.panel_u = fm.width > 0 ? 800.0f * ui / fm.width : 0.0f;
+            cb.menu_alpha = std::clamp(fm.menu_alpha, 0.0f, 1.0f);
+            cb.footer_v = fm.height > 0 ? 1.0f - 128.0f * ui / fm.height : 1.0f;
         }
         if (g_world_active && since_menu >= 2 && g_r.ps_world && ensure_world_rtv()) {
             cb.out_linear = g_r.world_linear ? 1.0f : 0.0f;
@@ -680,7 +705,8 @@ void shutdown() {
     if (ID3D11Texture2D* t = g_world_tex.exchange(nullptr)) t->Release();
     for (IUnknown** p : std::initializer_list<IUnknown**>{
              reinterpret_cast<IUnknown**>(&g_r.world_rtv), reinterpret_cast<IUnknown**>(&g_r.back_rtv), reinterpret_cast<IUnknown**>(&g_r.guest_srv),
-             reinterpret_cast<IUnknown**>(&g_r.guest_tex), reinterpret_cast<IUnknown**>(&g_r.vs), reinterpret_cast<IUnknown**>(&g_r.ps_world),
+             reinterpret_cast<IUnknown**>(&g_r.guest_tex), reinterpret_cast<IUnknown**>(&g_r.panel_srv), reinterpret_cast<IUnknown**>(&g_r.panel_tex),
+             reinterpret_cast<IUnknown**>(&g_r.vs), reinterpret_cast<IUnknown**>(&g_r.ps_world),
              reinterpret_cast<IUnknown**>(&g_r.ps_menu), reinterpret_cast<IUnknown**>(&g_r.cb), reinterpret_cast<IUnknown**>(&g_r.sampler),
              reinterpret_cast<IUnknown**>(&g_r.raster), reinterpret_cast<IUnknown**>(&g_r.no_depth), reinterpret_cast<IUnknown**>(&g_r.alpha_blend),
              reinterpret_cast<IUnknown**>(&g_r.ctx), reinterpret_cast<IUnknown**>(&g_r.dev)}) {

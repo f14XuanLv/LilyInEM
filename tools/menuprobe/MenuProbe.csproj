@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Dev tool: decode EL UI atlas regions (rest-menu BG / footer strips) and dump per-pixel
+       RGBA curves, plus the packaged DefaultEngine.ini (DPI scaling rule). Paths come from
+       devconfig.json via run.ps1; CUE4ParseRoot can also be passed with -p:CUE4ParseRoot=. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <Target Name="RequireCUE4ParseRoot" BeforeTargets="Restore;Build" Condition="'$(CUE4ParseRoot)' == ''">
+    <Error Text="CUE4ParseRoot is not set; run tools/menuprobe/run.ps1" />
+  </Target>
+
+  <ItemGroup>
+    <ProjectReference Include="$(CUE4ParseRoot)\CUE4Parse\CUE4Parse.csproj" />
+    <ProjectReference Include="$(CUE4ParseRoot)\CUE4Parse-Conversion\CUE4Parse-Conversion.csproj" />
+  </ItemGroup>
+
+</Project>
