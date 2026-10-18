@@ -69,12 +69,12 @@
 
 ### S5 HUD 与画面
 - [ ] 莉莉 HUD 目前是 ImGui 简易版（HP 条、祈祷、奥义槽、精灵 ID 文本）。需要换成 EL 原版贴图和排版（贴图经 CUE4Parse 提取，可参考 `D:\CodeT\ELMP\tools\icons\extract.ps1`），并显示精灵剩余次数 / 冷却（`Vitals.slots` 字段已留好，Guest 还没有填）。
-- [ ] 抠像仍是阈值法（`h_render.cpp` 的 `kKeyHlsl`），深色像素可能被抠掉。可以改成双背景求 alpha。
+- [x] 抠像已替换为真 alpha 通道（2026-10-19，详见 `docs\TRUE_ALPHA.md`）：Guest `USceneCaptureComponent2D`（`SCS_SceneColorHDR` → 预乘 RGB + inv-opacity A）经第二块共享纹理发 Host，`s = bb.rgb / cov`。`keyed()` 保留为 capture 未就绪时的回退。
 - [ ] 色彩：EM 色调映射会让莉莉偏灰（`Toggles.quad_gain` 已预留，没有逆色调映射）。
 - [ ] 世界层通道不可用时的 Present 兜底合成没有实现（v3 只保留了世界层主通道）。
-- [ ] **休息点的莉莉 / 英灵画面不准确（待专项完善）**（2026-10-18 实测记录）：
-  - 世界层仍是单帧亮度抠像（`kKeyHlsl` `keyed()`：四邻最小亮度 `smoothstep(0.03, 0.09)` 判实心，其余 alpha = 峰值通道并除 alpha 还原颜色）。EL 英灵（如 s5000 黑骑士）大面积暗色铠甲低于阈值 → 在 EM 里出现**镂空**；把阈值降到 `0.002–0.012`（EL 摄影棚背景实测恰为 0）能补上实心，但淡发光 / 半透明边缘被判成实心 → 出现**外围阴影 / 暗晕**（已回退）。
-  - EL 摄影棚背景像素实测为精确 0；EL 后缓冲是 A2B10G10R10，alpha 被写成不透明，**不能直接用 alpha**。
+- [x] **休息点的莉莉 / 英灵画面：已改为 SceneCapture 真 alpha**（2026-10-19，`docs\TRUE_ALPHA.md`）：
+  - ~~世界层仍是单帧亮度抠像~~ → `chars` 通道给真实覆盖率，暗色盔甲 / 半透明边缘 / 纯黑特效都正确；`keyed()` 仅作 capture 未就绪回退。
+  - EL 摄影棚背景像素实测为精确 0；EL 后缓冲是 A2B10G10R10，alpha 被写成不透明，**不能直接用 alpha**——所以 alpha 走独立的 SceneCapture RT，不碰后缓冲。
   - 双背景求 alpha（EL 每帧交替黑 / 白：`PlayerCameraManager::SetManualCameraFade(1, white)` 画在 UI 之下、场景之上）对 UI 数学上精确，但 Guest 的逐帧标记与帧内容不能稳定对齐（游戏线程 post-tick 置标记 vs 渲染线程 Present 读取），同色两帧相邻即整屏白闪；用帧角落判黑白又会被底部页脚 / 全屏菜单遮挡误判。已整体撤掉，现为单帧合成（无闪烁）。
   - camera fade 会把整个场景（含莉莉）刷白，所以它只能给 UI 求 alpha；要给角色 / 英灵求精确 alpha，需要只在**背景**后放一块纯白无光照板（或 SceneCapture / 每帧可靠的内容标记），并保证同一 Present 里的黑白配对。
   - 休息期间 EL 相机 `WorldSpaceLocationOffset.Y = -280`，莉莉与英灵位于画面右侧（UV≈0.47–0.97），`FrameKind::Split` 的世界矩形 = 莉莉脚底左 330 / 右 540 / 上 430 / 下 40 UU；英灵位置取自 EL 休息点 `SpiritLocation_1..3`（-170 / +170 / +340 UU，播 `rest` 动画 track 9）。
