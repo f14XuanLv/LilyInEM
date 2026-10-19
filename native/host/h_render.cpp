@@ -63,9 +63,13 @@ float4 keyed(float2 uv) {
     float3 s = a > 1e-4 ? saturate(c / a) : float3(0, 0, 0);
     return float4(s, a);
 }
+// Light the capture has no coverage for (BLEND_Additive writes A = 0, bloom is post-process, HDR translucency
+// tonemaps above its coverage) shows up as peak(bb) > cov; premult normal-blend content never does. Raising
+// alpha to peak(bb) keeps s * a == bb exactly (no light lost or clipped) and leaves normal content untouched.
 float4 covered(float2 uv) {       // real alpha path: unpremultiply the back buffer by capture coverage
-    float a = 1.0 - chars.Sample(samp, uv).a;
-    float3 s = a > 1e-4 ? saturate(px(uv) / a) : float3(0, 0, 0);
+    float3 c = px(uv);
+    float a = saturate(max(1.0 - chars.Sample(samp, uv).a, peak(c)));
+    float3 s = a > 1e-4 ? saturate(c / a) : float3(0, 0, 0);
     return float4(s, a);
 }
 struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };

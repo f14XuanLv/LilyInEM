@@ -70,6 +70,8 @@
 ### S5 HUD 与画面
 - [ ] 莉莉 HUD 目前是 ImGui 简易版（HP 条、祈祷、奥义槽、精灵 ID 文本）。需要换成 EL 原版贴图和排版（贴图经 CUE4Parse 提取，可参考 `D:\CodeT\ELMP\tools\icons\extract.ps1`），并显示精灵剩余次数 / 冷却（`Vitals.slots` 字段已留好，Guest 还没有填）。
 - [x] 抠像已替换为真 alpha 通道（2026-10-19，详见 `docs\TRUE_ALPHA.md`）：Guest `USceneCaptureComponent2D`（`SCS_SceneColorHDR` → 预乘 RGB + inv-opacity A）经第二块共享纹理发 Host，`s = bb.rgb / cov`。`keyed()` 保留为 capture 未就绪时的回退。
+- [x] 加法 / Bloom / HDR 特效光补漏（2026-10-19，`docs\TRUE_ALPHA.md` 第 6 节）：Additive 材质与后处理在 capture 里没有覆盖率，`covered()` 改为 `a = max(cov, peak(bb))`，光不再丢失或截断。
+- [ ] 扭曲特效（`M_Yugami100` 等 `bUsesDistortion` 材质，如 S5000）只扭曲 EL 黑摄影棚，EM 背景不扭曲；alpha 通道无法承载，需在 EM 侧重建。
 - [x] EL 导出分辨率跟随 EM（2026-10-19）：`Control::guest_res_w/h` = EM backbuffer × `ResScale`（`LilyInEM.ini` 可调，默认 5/3，上不封顶）；Host 在 Present 里推送，Guest 子类化窗口解除 `WM_GETMINMAXINFO` 桌面钳制后 `SetWindowPos`（`r.setres` 会被钳到桌面）应用，ResizeBuffers → 共享纹理 + capture RT 自动重建。实测全链路（1280×720×4/3 → 1707×960；默认档 EM 1920×1080×5/3 → 3200×1800），世界层与菜单均降采样、Split 正常。
 - [ ] 色彩：EM 色调映射会让莉莉偏灰（`Toggles.quad_gain` 已预留，没有逆色调映射）。
 - [ ] 世界层通道不可用时的 Present 兜底合成没有实现（v3 只保留了世界层主通道）。

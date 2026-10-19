@@ -65,7 +65,7 @@
 | `native/guest/g_capture.cpp`（新） | 生成 actor + `AddComponentByClass(SceneCaptureComponent2D, deferred)`，设 `CaptureSource/PrimitiveRenderMode/bCaptureEveryFrame=false/bCaptureOnMovement=false`，`capture_expect_rt` 后 `CreateRenderTarget2D`，写 `TextureTarget` 字段，`FinishAddComponent`；每 tick 读 `CameraCachePrivate.POV` → `K2_SetWorldLocationAndRotation` + `FOVAngle/ProjectionType/OrthoWidth` → `CaptureScene()` |
 | `native/guest/g_frame.cpp` | `CreateTexture2D` 钩子（want+匹配+AddRef）、staging 回读验证、第二块共享纹理 + `meta.chars_handle`、resize/shutdown 释放 |
 | `native/guest/g_body.cpp` | `publish_projection` 里调 `capture_tick(pc)`（同一相机源）；`reset_anchor` 里 `capture_reset()` |
-| `native/host/h_render.cpp` | `chars` 纹理 t1（panel 移 t2）、`chars_on` 开关、`covered() = s: bb.rgb/cov`；`chars_handle=0` 时回退 `keyed()` |
+| `native/host/h_render.cpp` | `chars` 纹理 t1（panel 移 t2）、`chars_on` 开关、`covered()`：`a = max(cov, peak(bb))`、`s = bb.rgb/a`（第 6 节）；`chars_handle=0` 时回退 `keyed()` |
 | 坑 | `ensure` 撞 UE 宏 → `ensure_capture`；`ue::FProperty` 完整定义需 `<Unreal/CoreUObject/UObject/UnrealType.hpp>` |
 
 ## 4. EL 导出分辨率跟随 EM（2026-10-19 追加）
@@ -81,8 +81,27 @@
 1. 日志三连（全绿才算通）：guest `scene capture armed (<WxH>)`、`capture RT texture grabbed (format 10)`、host `scene-capture alpha channel open`。默认档 EM 1920×1080 × `ResScale` 5/3 → `armed (3200x1800)`；尺寸随 `guest_res_w/h` 变。
 2. `verify_capture_rt` 无 drop 日志。
 3. 截图：暗部实心（s5000 黑骑士盔甲、莉莉裙摆阴影）、特效正常叠加、Split/开合菜单无残留。
+4. 加法光：技能光晕 / 发光粒子在空白处可见、叠在半透明特效上的亮部不被削平（见第 6 节）。
 
-## 5. 可复用的检索路径速查
+## 6. 特效补漏：capture 没有覆盖率的光（2026-10-19 追加）
+
+从 ParticleSystemManager（Cascade 资产编辑 Mod）的遍历路径 `Emitters → LODLevels → RequiredModule.Material / TypeDataModule` 往下追：
+
+| 现象 | 出处 | 结论 |
+|---|---|---|
+| 加法粒子不写覆盖率 | `BasePassPixelShader.usf:1418` `half4(Color*Opacity, 0)` + `BasePassRendering.cpp:206` alpha `BF_Zero, BF_InverseSourceAlpha` | Additive 在 capture 里 cov 不变；EL 母材质 `M_RGBA_Suv1` / `M_Grayscale_Suv1` / `M_Aura` 均为 Additive |
+| Bloom 不进 capture | `SceneCaptureRendering.cpp:503` PostProcessing=0；`DeferredShadingRenderer.cpp:2485` 在后处理前拷出 | 光晕在 bb 有、cap 无 |
+| HDR 半透明 | tonemap 后 `peak(bb)` 可超 cov | 旧 `saturate(bb/cov)` 截断 |
+
+修复（`h_render.cpp::covered`）：`a = max(cov, peak(bb))`，`s = bb/a`。普通混合恒有 `peak(bb) ≤ cov` → 不变；超出部分 `s·a ≡ bb` 光全保留，代价仅是这些像素 EM 背景被压暗 `peak − cov`。
+
+已知缺口：`M_Yugami100`（`bUsesDistortion`，S5000 用）的扭曲只作用在黑摄影棚，EM 背景不会被扭曲，alpha 通道无法承载。
+
+**排除项（别再查）**：
+- Separate Translucency：PostProcessing=0 → `AllowTranslucencyAfterDOF()` false，全部半透明画进 SceneColor。
+- "alpha 晚一帧"：曾推断 EngineTickPost 的 capture 排在 Present 之后——错。游戏模式下 Present 在 Slate `DrawWindows`（`LaunchEngineLoop.cpp:4944`，`GEngine->Tick` 之后），capture N 先于 Present N。另：Guest 里 `HUD:ReceiveDrawHUD` 实测从不触发，不能当挂点。
+
+## 7. 可复用的检索路径速查
 
 - **语义判定**（alpha/混合/渲染流程）：直接 grep `C:\Code2\UnrealEngine-4.26.2-release\Engine\{Source,Shaders}`——枚举注释、usf 写出、C++ clear/blend 三连看，比任何二手资料可靠。
 - **类/属性存在性**（只读）：`.\tools\eval.ps1 -Role guest -Code "local ok,v = pcall(function() return obj.Prop end); return tostring(ok)..':'..tostring(v)"`，逐属性 pcall，不要链式取值（曾把 Guest 探崩）。
@@ -90,3 +109,6 @@
 - **类继承**：SDK 工程头文件 grep（`D:\CodeT\EnderLilies`、`D:\CodeT\EnderMagnolia`）。
 - **拿不到的东西就 hook**：反射层只到 UObject；D3D11/RHI 对象用 vtable 钩子（本工程两处先例：swapchain Present、device CreateTexture2D）。
 - **截图验证**：`tools\capture.ps1 -Name x -Role host|guest` → `<UserDir>\Saved\LIE\shots\`。
+- **特效/材质资产事实**（离线）：cue4parse MCP `init_provider(EL Paks, GAME_UE4_26)` → `get_exports(PS_*)` 列发射器 → `get_property_path(...:ParticleModuleRequired_N, "Material")` → MI 的 `Parent` + `BasePropertyOverrides.BlendMode`、母材质 `BlendMode / bUsesDistortion`。MI 可覆盖混合模式，母材质不能代表实例。
+- **帧时序推断**：必须追到 `FEngineLoop::Tick`（`LaunchEngineLoop.cpp`），只看 `UGameEngine::Tick` 会误判——游戏模式 Present 在 Slate 阶段。
+- **新挂点先实测**：打算挂某个 UFunction 前，用 bridge `hook_function` + `poll_events` 确认它真的在触发，再写代码。
