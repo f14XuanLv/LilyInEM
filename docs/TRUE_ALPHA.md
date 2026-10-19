@@ -101,7 +101,36 @@
 - Separate Translucency：PostProcessing=0 → `AllowTranslucencyAfterDOF()` false，全部半透明画进 SceneColor。
 - "alpha 晚一帧"：曾推断 EngineTickPost 的 capture 排在 Present 之后——错。游戏模式下 Present 在 Slate `DrawWindows`（`LaunchEngineLoop.cpp:4944`，`GEngine->Tick` 之后），capture N 先于 Present N。另：Guest 里 `HUD:ReceiveDrawHUD` 实测从不触发，不能当挂点。
 
-## 7. 可复用的检索路径速查
+## 7. EL HUD 第三通道：UWidgetComponent 真 alpha（2026-10-19 追加）
+
+需求：EL 左上（HP / 祈祷 / 等级）、左下（奥义槽 / 精灵技能 / 组切换）原样进 EM 屏幕空间；ImGui 简易 HUD 删除。
+
+### 7.1 为什么不能沿用 capture
+UMG 不是场景 primitive，capture 里覆盖率为 0；在后缓冲里它又会被 `covered()` 的 `a = max(cov, peak(bb))` 当成"加法光"并进世界层（跟着莱拉克面片走）。HUD 的暗色底板（技能圈内灰、∞ 阴影、空槽底色）在黑底上同样**没有 alpha**——和休息菜单 BG 是同一个数学问题。结论：HUD 必须**离开 EL 后缓冲**，单独渲染到带 alpha 的目标。
+
+### 7.2 定型（引擎源码判定）
+| 判定点 | 出处 | 结论 |
+|---|---|---|
+| 谁能把 UMG 画进 RT | `WidgetComponent.cpp` `TickComponent → DrawWidgetToRenderTarget → FWidgetRenderer::DrawWindow` | `Space=World` 时每 tick 画进 `RenderTarget`（UPROPERTY，可直接写） |
+| 画的门槛 | `ShouldDrawWidget`：`IsVisible()` + (`TickWhenOffscreen` 或最近被渲染) | 组件可见、`TickWhenOffscreen=true`；**宿主 actor 隐藏**只影响 `ShouldRender`（无 scene proxy，不进摄影棚 / capture） |
+| RT 不被替换 | `UpdateRenderTarget`：ClearColor 与 `ActualBackgroundColor`（Transparent，Masked 时 A=0）相同且尺寸相同则不 `InitCustomFormat` | 自建 `CreateRenderTarget2D(RTF_RGBA16f, clear=0)` 写进字段即可；`DrawSize` 先置 0 防止引擎抢先建 `PF_B8G8R8A8` |
+| 颜色空间 | `bApplyGammaCorrection=false` → `FWidgetRenderer(bUseGammaSpace=false)`；Float RT 线性 | RT = **线性预乘 rgb + 真覆盖率 a** |
+| 混合 | `SlateRHIRenderingPolicy.cpp:812` `SrcAlpha/InvSrcAlpha`，alpha `One/InvSrcAlpha` | 标准预乘 over |
+| 尺寸 | `DrawWidgetToRenderTarget` 的 `DrawScale` 恒 1 | 按 EL 设计尺寸建：`ui = min(w/1920, h/1080)`，RT = 帧尺寸 / ui（16:9 → 1920×1080），布局与 EL 视口一致 |
+| 搬家不触发 Destruct | `UUserWidget::RemoveFromParent` 只移除视口宿主 | **先 `SetWidget` 再 `RemoveFromParent`**：SVirtualWindow 持有 SObjectWidget，`Construct/Destruct`（及 GameSettings 委托）不抖动 |
+| 跟随哪一个实例 | `PC_Base` 字节码（cue4parse）：`InitializeUI` 在 `OnGameDataLoaded / OnPawnRespawn` 时新建 + `AddToViewport` | 每 tick 读 `pc.PlayerUI`，变了就重新 `SetWidget`；0.25 s 复查 `IsInViewport` |
+| 显示开关 | `WBP_PlayerUI::RefreshPlayerUIContainerVisibility` 读 `GetDisplayPlayerUI` | 搬出视口后才 `SetDisplayPlayerUI(true)`（`stage_headless` 不再关它） |
+
+### 7.3 合成（`h_render.cpp::ps_hud`）
+EL 视口里 Slate 在显示伽马里混合（`pow(1/2.2)`，DisplayGamma 2.2）：`s = pow(rgb/a, 1/2.2)`，输出 `(s·a, a)`，ONE/INV_SRC_ALPHA → 单层精确。Slate 加法绘制（`BF_One, BF_One`）不加覆盖率：权重取 `max(a, peak(rgb))` 防止除爆、保留光。只在 `ctx==Gameplay && 世界层激活 && FrameKind::World` 时画（EM 菜单 / EL 菜单时不画）。
+
+### 7.4 传输
+`g_frame` 的抓取泛化为 `Grab`（capture / HUD 两份）：同一个 `CreateTexture2D` 钩子，HUD 在 capture 抓到后才武装（两者 desc 可能相同）；HUD 验证 = 采样里存在 a==0（清成透明）；`FrameMeta::hud_handle`（协议 7），仅在组件持有 PlayerUI 时导出。HUD RT 是设计尺寸，swap chain resize 不释放它。
+
+### 7.5 验证
+日志：guest `HUD widget component spawned` / `HUD render target 1920x1080` / `HUD RT texture grabbed (format 10)` / `EL PlayerUI moved into the HUD channel`，host `EL HUD channel open`。截图：EL 后缓冲里无 HUD；EM 里技能圈暗底、∞ 阴影、空槽半透明底色都在，边缘无黑边；F5 菜单期间 HUD 不画，关闭后恢复。
+
+## 8. 可复用的检索路径速查
 
 - **语义判定**（alpha/混合/渲染流程）：直接 grep `C:\Code2\UnrealEngine-4.26.2-release\Engine\{Source,Shaders}`——枚举注释、usf 写出、C++ clear/blend 三连看，比任何二手资料可靠。
 - **类/属性存在性**（只读）：`.\tools\eval.ps1 -Role guest -Code "local ok,v = pcall(function() return obj.Prop end); return tostring(ok)..':'..tostring(v)"`，逐属性 pcall，不要链式取值（曾把 Guest 探崩）。

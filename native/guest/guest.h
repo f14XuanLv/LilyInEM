@@ -28,6 +28,8 @@ bool frame_dims(unsigned& w, unsigned& h);   // exported frame size (0 until the
 void request_frame_size(std::uint32_t w, std::uint32_t h); // SetWindowPos the off-screen window; beats r.setres's desktop clamp
 void capture_expect_rt(unsigned w, unsigned h); // arm the CreateTexture2D grab for the capture RT
 bool capture_rt_ready();
+void hud_expect_rt(unsigned w, unsigned h);     // arm the CreateTexture2D grab for the HUD widget RT
+void hud_set_live(bool live);                   // export FrameMeta::hud_handle only while the HUD channel draws
 void* window();
 void shutdown_frame();
 
@@ -36,6 +38,10 @@ void shutdown_frame();
 // giving the Host premult RGB + inverse-opacity alpha instead of a luminance key.
 void capture_tick(UObject* pc); // spawn/sync/drive the capture; safe to call every tick
 void capture_reset();
+
+// ---- g_hud.cpp: EL's own HUD (WBP_PlayerUI) -> UWidgetComponent RT -> shared texture with real alpha ----
+void hud_tick(UObject* pc); // adopt EL's PlayerUI out of the viewport; safe to call every tick
+void hud_reset();
 
 // ---- g_stage.cpp: black studio + headless EL services ----
 void stage_isolate_all(UObject* pc, UObject* lily);

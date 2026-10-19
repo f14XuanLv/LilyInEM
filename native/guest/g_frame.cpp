@@ -30,6 +30,23 @@ PresentFn g_present = nullptr;
 ResizeFn g_resize = nullptr;
 CreateTexFn g_create_tex = nullptr;
 
+// A UTextureRenderTarget2D we created on the game thread: its native texture is grabbed by the CreateTexture2D
+// detour (*_expect_rt arms the match right before the RT is created), then copied each Present into a shared
+// texture for the Host.
+struct Grab {
+    const wchar_t* name;
+    bool (*proof)(const D3D11_TEXTURE2D_DESC&, const std::uint8_t* row, UINT x); // true = proves the grab
+    ID3D11Texture2D* rt = nullptr;
+    ID3D11Texture2D* shared = nullptr;
+    HANDLE handle = nullptr;
+    D3D11_TEXTURE2D_DESC want{};        // desc the detour should grab (w/h/fmt/bind)
+    bool want_active = false;
+    bool checked = false;               // one-shot staging verification done
+    std::uint32_t check_frames = 0;     // world-kind frames seen since the grab
+};
+
+std::uint16_t alpha16(const std::uint8_t* row, UINT x) { return *reinterpret_cast<const std::uint16_t*>(row + x * 8 + 6); }
+
 struct Export {
     std::mutex m;
     ID3D11Device* device = nullptr;
@@ -40,16 +57,12 @@ struct Export {
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     std::uint64_t seq = 0;
 
-    // SceneCapture2D alpha channel: the capture RT's native texture is grabbed by the CreateTexture2D
-    // detour (capture_expect_rt arms the match, g_capture creates the RT), then copied each Present
-    // into shared_chars for the Host.
-    ID3D11Texture2D* shared_chars = nullptr;
-    HANDLE chars_handle = nullptr;
-    ID3D11Texture2D* capture_rt = nullptr;
-    D3D11_TEXTURE2D_DESC want{};        // desc the detour should grab (w/h/fmt/bind)
-    bool want_active = false;
-    bool rt_checked = false;            // one-shot staging verification done
-    std::uint32_t rt_check_frames = 0;  // world-kind frames seen since the grab
+    // SceneCapture2D alpha channel: a live capture contains inverse-opacity alpha (some a < 1) once Lily is on
+    // screen; a wrong grab stays uniformly 1
+    Grab chars{L"capture", [](const D3D11_TEXTURE2D_DESC&, const std::uint8_t* row, UINT x) { return alpha16(row, x) < 0x3C00; /* half 1.0 */ }};
+    // EL HUD channel: the widget RT is cleared to transparent, so most of it is exactly a = 0; an opaque target never is
+    Grab hud{L"HUD", [](const D3D11_TEXTURE2D_DESC&, const std::uint8_t* row, UINT x) { return alpha16(row, x) == 0; }};
+    std::atomic<bool> hud_live{false};  // game thread: the component holds EL's PlayerUI and draws into the RT
 } g_x;
 
 struct Staged {
@@ -65,27 +78,39 @@ std::atomic<HWND> g_hwnd{nullptr};
 
 void release_textures() {
     d3d::release(g_x.shared);
-    d3d::release(g_x.shared_chars);
+    d3d::release(g_x.chars.shared);
     g_x.handle = nullptr;
-    g_x.chars_handle = nullptr;
+    g_x.chars.handle = nullptr;
     g_x.w = g_x.h = 0;
 }
 
-// The capture RT is the only texture EL creates with this desc (a full-res FloatRGBA target carries
-// TexCreate_UAV; ours is plain RT|SRV), so a want-flagged match is enough. A one-shot staging readback
-// in on_present still proves it (the capture contains inverse-opacity alpha: some a < 0.99 once Lily
-// is on screen); on failure the match resumes.
+void release_grab(Grab& g) {
+    d3d::release(g.rt);
+    d3d::release(g.shared);
+    g.handle = nullptr;
+    g.checked = false;
+    g.check_frames = 0;
+}
+
+bool try_grab(Grab& g, const D3D11_TEXTURE2D_DESC* d, ID3D11Texture2D* tex) {
+    if (!g.want_active || g.rt || d->Width != g.want.Width || d->Height != g.want.Height || d->Format != g.want.Format ||
+        (d->BindFlags & g.want.BindFlags) != g.want.BindFlags || d->Usage != D3D11_USAGE_DEFAULT)
+        return false;
+    tex->AddRef();
+    g.rt = tex;
+    g.want_active = false;
+    g.checked = false;
+    g.check_frames = 0;
+    log::info(L"%s RT texture grabbed (format %d)", g.name, static_cast<int>(d->Format));
+    return true;
+}
+
+// Our RTs are the only textures EL creates with these descs (full-res FloatRGBA targets of the renderer
+// carry TexCreate_UAV; ours are plain RT|SRV), so a want-flagged match is enough. A one-shot staging
+// readback in on_present still proves each grab; on failure the match resumes.
 HRESULT STDMETHODCALLTYPE on_create_tex(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC* d, const D3D11_SUBRESOURCE_DATA* init, ID3D11Texture2D** out) {
     const HRESULT hr = g_create_tex(dev, d, init, out);
-    if (SUCCEEDED(hr) && d && out && *out && g_x.want_active && !g_x.capture_rt && d->Width == g_x.want.Width && d->Height == g_x.want.Height &&
-        d->Format == g_x.want.Format && (d->BindFlags & g_x.want.BindFlags) == g_x.want.BindFlags && d->Usage == D3D11_USAGE_DEFAULT) {
-        (*out)->AddRef();
-        g_x.capture_rt = *out;
-        g_x.want_active = false;
-        g_x.rt_checked = false;
-        g_x.rt_check_frames = 0;
-        log::info(L"capture RT texture grabbed (format %d)", static_cast<int>(d->Format));
-    }
+    if (SUCCEEDED(hr) && d && out && *out && !try_grab(g_x.chars, d, *out)) try_grab(g_x.hud, d, *out);
     return hr;
 }
 
@@ -146,36 +171,57 @@ bool ensure_texture(IDXGISwapChain* swap, const D3D11_TEXTURE2D_DESC& back) {
     return g_x.handle != nullptr;
 }
 
-// One-shot staging readback: a live capture contains inverse-opacity alpha (some a < 1) whenever the
-// world layer is on screen. A wrong grab stays uniformly 1 -> drop it and keep matching.
-bool verify_capture_rt() {
-    if (!g_x.capture_rt) return false;
+// One-shot staging readback (both RTs are R16G16B16A16_FLOAT): some sampled pixel must satisfy the grab's proof
+bool verify_grab(const Grab& g) {
+    if (!g.rt) return false;
     D3D11_TEXTURE2D_DESC d{};
-    g_x.capture_rt->GetDesc(&d);
+    g.rt->GetDesc(&d);
+    if (d.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) return false;
     d.Usage = D3D11_USAGE_STAGING;
     d.BindFlags = 0;
     d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     d.MiscFlags = 0;
     ID3D11Texture2D* staging = nullptr;
     if (FAILED(g_x.device->CreateTexture2D(&d, nullptr, &staging)) || !staging) return true; // cannot verify: keep it
-    g_x.context->CopyResource(staging, g_x.capture_rt);
+    g_x.context->CopyResource(staging, g.rt);
     D3D11_MAPPED_SUBRESOURCE m{};
-    bool covered = false;
+    bool ok = false;
     if (SUCCEEDED(g_x.context->Map(staging, 0, D3D11_MAP_READ, 0, &m))) {
         const auto* p = static_cast<const std::uint8_t*>(m.pData);
-        const bool fp16 = d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
-        const UINT stride = fp16 ? 8 : 4, aoff = fp16 ? 6 : 3;
-        for (UINT y = 0; y < d.Height && !covered; y += 8) {
+        for (UINT y = 0; y < d.Height && !ok; y += 8) {
             const auto* row = p + static_cast<std::size_t>(y) * m.RowPitch;
-            for (UINT x = 0; x < d.Width && !covered; x += 8) {
-                if (fp16) covered = *reinterpret_cast<const std::uint16_t*>(row + x * stride + aoff) < 0x3C00; // half 1.0f
-                else covered = row[x * stride + aoff] < 0xFD;
-            }
+            for (UINT x = 0; x < d.Width && !ok; x += 8) ok = g.proof(d, row, x);
         }
         g_x.context->Unmap(staging, 0);
     }
     staging->Release();
-    return covered;
+    return ok;
+}
+
+// Per Present: verify once, then copy the grabbed RT into its shared texture. Returns the shared handle (0 = none).
+std::uintptr_t export_grab(Grab& g, bool verify_now) {
+    if (g.rt && !g.checked && verify_now && ++g.check_frames > 30) {
+        if (!verify_grab(g)) {
+            log::error(L"%s RT grab failed verification: dropping it", g.name);
+            release_grab(g);
+            g.want_active = true; // keep matching the real one if it is created later
+        }
+        g.checked = true;
+    }
+    if (!g.rt) return 0;
+    D3D11_TEXTURE2D_DESC cd{};
+    g.rt->GetDesc(&cd);
+    if (g.shared) {
+        D3D11_TEXTURE2D_DESC sd{};
+        g.shared->GetDesc(&sd);
+        if (sd.Width != cd.Width || sd.Height != cd.Height || sd.Format != cd.Format) {
+            d3d::release(g.shared);
+            g.handle = nullptr;
+        }
+    }
+    if (!ensure_shared(cd, g.shared, g.handle)) return 0;
+    g_x.context->CopyResource(g.shared, g.rt);
+    return reinterpret_cast<std::uintptr_t>(g.handle);
 }
 
 void post_key(HWND hwnd, WPARAM key, bool down) {
@@ -237,42 +283,19 @@ HRESULT STDMETHODCALLTYPE on_present(IDXGISwapChain* swap, UINT sync, UINT flags
             back->GetDesc(&bd);
             if (ensure_texture(swap, bd)) {
                 g_x.context->CopyResource(g_x.shared, back);
-                std::uintptr_t chars_handle = 0;
+                FrameKind kind;
                 {
-                    FrameKind kind;
-                    {
-                        std::scoped_lock sl(g_staged.m);
-                        kind = g_staged.kind;
-                    }
-                    if (g_x.capture_rt && !g_x.rt_checked && kind != FrameKind::Menu && ++g_x.rt_check_frames > 30) {
-                        if (!verify_capture_rt()) {
-                            log::error(L"capture RT grab failed verification (alpha uniformly 1): dropping it");
-                            d3d::release(g_x.capture_rt);
-                            g_x.want_active = true; // keep matching the real one if it is created later
-                        }
-                        g_x.rt_checked = true;
-                    }
-                    if (g_x.capture_rt) {
-                        D3D11_TEXTURE2D_DESC cd{};
-                        g_x.capture_rt->GetDesc(&cd);
-                        if (g_x.shared_chars) {
-                            D3D11_TEXTURE2D_DESC sd{};
-                            g_x.shared_chars->GetDesc(&sd);
-                            if (sd.Width != cd.Width || sd.Height != cd.Height || sd.Format != cd.Format) {
-                                d3d::release(g_x.shared_chars);
-                                g_x.chars_handle = nullptr;
-                            }
-                        }
-                        if (ensure_shared(cd, g_x.shared_chars, g_x.chars_handle)) {
-                            g_x.context->CopyResource(g_x.shared_chars, g_x.capture_rt);
-                            chars_handle = reinterpret_cast<std::uintptr_t>(g_x.chars_handle);
-                        }
-                    }
+                    std::scoped_lock sl(g_staged.m);
+                    kind = g_staged.kind;
                 }
+                const std::uintptr_t chars_handle = export_grab(g_x.chars, kind != FrameKind::Menu);
+                const bool hud_live = g_x.hud_live.load();
+                const std::uintptr_t hud_handle = hud_live ? export_grab(g_x.hud, true) : 0;
                 g_x.context->Flush();
                 FrameMeta meta{};
                 meta.shared_handle = reinterpret_cast<std::uintptr_t>(g_x.handle);
                 meta.chars_handle = chars_handle;
+                meta.hud_handle = hud_handle;
                 meta.width = g_x.w;
                 meta.height = g_x.h;
                 {
@@ -302,9 +325,7 @@ HRESULT STDMETHODCALLTYPE on_resize(IDXGISwapChain* swap, UINT n, UINT w, UINT h
     {
         std::scoped_lock lk(g_x.m);
         release_textures();
-        d3d::release(g_x.capture_rt);
-        g_x.rt_checked = false;
-        g_x.rt_check_frames = 0;
+        release_grab(g_x.chars); // the capture RT follows the frame size; the HUD RT is design-sized and stays
     }
     return g_resize(swap, n, w, h, f, flags);
 }
@@ -348,22 +369,24 @@ bool frame_dims(UINT& w, UINT& h) {
     return w != 0 && h != 0;
 }
 
-void capture_expect_rt(UINT w, UINT h) {
+static void expect_rt(Grab& g, UINT w, UINT h) {
     std::scoped_lock lk(g_x.m);
-    g_x.want = {};
-    g_x.want.Width = w;
-    g_x.want.Height = h;
-    g_x.want.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; // UTextureRenderTarget2D RTF_RGBA16f
-    g_x.want.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    g_x.want_active = true;
-    d3d::release(g_x.capture_rt);
-    g_x.rt_checked = false;
-    g_x.rt_check_frames = 0;
+    g.want = {};
+    g.want.Width = w;
+    g.want.Height = h;
+    g.want.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; // UTextureRenderTarget2D RTF_RGBA16f
+    g.want.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    g.want_active = true;
+    release_grab(g);
 }
+
+void capture_expect_rt(UINT w, UINT h) { expect_rt(g_x.chars, w, h); }
+void hud_expect_rt(UINT w, UINT h) { expect_rt(g_x.hud, w, h); }
+void hud_set_live(bool live) { g_x.hud_live.store(live); }
 
 bool capture_rt_ready() {
     std::scoped_lock lk(g_x.m);
-    return g_x.capture_rt != nullptr;
+    return g_x.chars.rt != nullptr;
 }
 
 void* window() { return g_hwnd.load(); }
@@ -396,7 +419,8 @@ void request_frame_size(std::uint32_t w, std::uint32_t h) {
 void shutdown_frame() {
     std::scoped_lock lk(g_x.m);
     release_textures();
-    d3d::release(g_x.capture_rt);
+    release_grab(g_x.chars);
+    release_grab(g_x.hud);
     d3d::release(g_x.context);
     d3d::release(g_x.device);
 }

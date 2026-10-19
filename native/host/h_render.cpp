@@ -4,7 +4,8 @@
 // - world layer (FR-CMP-1): the EL frame is keyed into our render target, which EM samples through
 //   MI_Spine_Character on a quad attached to Lilac (same sort layer as Lilac, under EM UI / fades / foreground)
 // - LilyMenu: EL's native menu (Lily hidden in that frame) is keyed over the EM world
-// - ImGui: F6 loadout panel, Lily HUD, F10 oracle panel, toasts
+// - EL HUD: EL's own WBP_PlayerUI arrives on its own channel with real alpha and goes over EM in screen space
+// - ImGui: F6 loadout panel, F10 oracle panel, toasts
 
 #include "host/host.h"
 #include "host/rest_panel_alpha.h"
@@ -104,6 +105,17 @@ float4 ps_menu(VSOut i) : SV_Target {
     float a = key + dim * (1.0 - key);              // both sit under the menu content
     return float4(min(c, a), a);
 }
+// EL HUD (hud channel, t0): Slate painted it in linear space into an RGBA16F target cleared to transparent, so
+// rgb is linear premultiplied and a the real coverage. EL's viewport Slate blends in display gamma (pow 1/2.2,
+// DisplayGamma 2.2): unpremultiply, gamma-encode, re-premultiply -> exact for a single layer. Additive Slate
+// draws add light without coverage: raising the weight to peak(rgb) keeps that light (no divide blow-up).
+float4 ps_hud(VSOut i) : SV_Target {
+    float4 h = frame.Sample(samp, i.uv);
+    float a = saturate(h.a);
+    float w = max(a, peak(h.rgb));
+    float3 s = w > 1e-4 ? pow(saturate(h.rgb / w), 1.0 / 2.2) : float3(0, 0, 0);
+    return float4(s * w, a);
+}
 )hlsl";
 
 struct alignas(16) KeyCB {
@@ -147,6 +159,7 @@ struct Renderer {
     ID3D11VertexShader* vs = nullptr;
     ID3D11PixelShader* ps_world = nullptr;
     ID3D11PixelShader* ps_menu = nullptr;
+    ID3D11PixelShader* ps_hud = nullptr;
     ID3D11Buffer* cb = nullptr;
     ID3D11SamplerState* sampler = nullptr;
     ID3D11RasterizerState* raster = nullptr;
@@ -160,6 +173,9 @@ struct Renderer {
     std::uint64_t opened_chars = 0;
     ID3D11Texture2D* chars_tex = nullptr;
     ID3D11ShaderResourceView* chars_srv = nullptr;
+    std::uint64_t opened_hud = 0;
+    ID3D11Texture2D* hud_tex = nullptr;
+    ID3D11ShaderResourceView* hud_srv = nullptr;
     ID3D11Texture2D* panel_tex = nullptr;
     ID3D11ShaderResourceView* panel_srv = nullptr;
     UINT gw = 0, gh = 0;
@@ -264,6 +280,7 @@ bool init(IDXGISwapChain* swap) {
     if (ID3DBlob* b = compile("vs_main", "vs_4_0")) { g_r.dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_r.vs); b->Release(); }
     if (ID3DBlob* b = compile("ps_world", "ps_4_0")) { g_r.dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_r.ps_world); b->Release(); }
     if (ID3DBlob* b = compile("ps_menu", "ps_4_0")) { g_r.dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_r.ps_menu); b->Release(); }
+    if (ID3DBlob* b = compile("ps_hud", "ps_4_0")) { g_r.dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_r.ps_hud); b->Release(); }
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(KeyCB);
     bd.Usage = D3D11_USAGE_DEFAULT;
@@ -344,25 +361,26 @@ ID3D11ShaderResourceView* guest_srv(const FrameMeta& fm) {
     return g_r.guest_srv;
 }
 
-ID3D11ShaderResourceView* chars_srv(const FrameMeta& fm) {
-    if (!fm.chars_handle) return nullptr;
-    if (fm.chars_handle != g_r.opened_chars || !g_r.chars_srv) {
-        d3d::release(g_r.chars_srv);
-        d3d::release(g_r.chars_tex);
-        g_r.opened_chars = 0;
-        ID3D11Texture2D* tex = nullptr;
-        if (FAILED(g_r.dev->OpenSharedResource(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(fm.chars_handle)), __uuidof(ID3D11Texture2D),
-                                               reinterpret_cast<void**>(&tex))) || !tex)
+// Secondary Guest textures (capture alpha, HUD): reopened whenever the Guest's shared handle changes
+ID3D11ShaderResourceView* shared_srv(std::uint64_t handle, std::uint64_t& opened, ID3D11Texture2D*& tex, ID3D11ShaderResourceView*& srv, const wchar_t* what) {
+    if (!handle) return nullptr;
+    if (handle != opened || !srv) {
+        d3d::release(srv);
+        d3d::release(tex);
+        opened = 0;
+        ID3D11Texture2D* t = nullptr;
+        if (FAILED(g_r.dev->OpenSharedResource(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(handle)), __uuidof(ID3D11Texture2D),
+                                               reinterpret_cast<void**>(&t))) || !t)
             return nullptr;
-        if (FAILED(g_r.dev->CreateShaderResourceView(tex, nullptr, &g_r.chars_srv))) {
-            tex->Release();
+        if (FAILED(g_r.dev->CreateShaderResourceView(t, nullptr, &srv))) {
+            t->Release();
             return nullptr;
         }
-        g_r.chars_tex = tex;
-        g_r.opened_chars = fm.chars_handle;
-        log::info(L"scene-capture alpha channel open");
+        tex = t;
+        opened = handle;
+        log::info(L"%s channel open", what);
     }
-    return g_r.chars_srv;
+    return srv;
 }
 
 struct StateBackup {
@@ -587,36 +605,6 @@ void draw_panel(const Vitals& v, const ImVec2& display) {
     if (!open) g_overlay = false;
 }
 
-void draw_hud(const Vitals& v, const ImVec2& display) {
-    auto* dl = ImGui::GetBackgroundDrawList();
-    const float s = display.y / 720.0f;
-    const ImVec2 o(40.0f * s, 40.0f * s);
-    const float w = 220.0f * s, h = 12.0f * s;
-    const float hp = v.max_hp > 0 ? std::clamp(float(v.hp) / float(v.max_hp), 0.0f, 1.0f) : 0.0f;
-    dl->AddRectFilled(o, ImVec2(o.x + w, o.y + h), IM_COL32(20, 18, 22, 190), 3.0f);
-    dl->AddRectFilled(o, ImVec2(o.x + w * hp, o.y + h), IM_COL32(222, 216, 200, 240), 3.0f);
-    char txt[48];
-    std::snprintf(txt, sizeof(txt), "%d / %d", v.hp, v.max_hp);
-    dl->AddText(ImVec2(o.x + w + 8.0f * s, o.y - 4.0f * s), IM_COL32(230, 224, 210, 240), txt);
-    for (int i = 0; i < std::min(v.max_heals, 12); ++i) { // prayers
-        const ImVec2 c(o.x + 8.0f * s + i * 18.0f * s, o.y + h + 14.0f * s);
-        dl->AddNgonFilled(c, 6.5f * s, i < v.heals ? IM_COL32(236, 214, 150, 235) : IM_COL32(70, 66, 60, 170), 4);
-    }
-    if (v.special_unlocked && v.max_mp > 0) { // special gauge (two segments with Ricorus' Ring)
-        const ImVec2 b(o.x, o.y + h + 28.0f * s);
-        const float r = std::clamp(float(v.mp) / float(v.max_mp), 0.0f, 1.0f);
-        dl->AddRectFilled(b, ImVec2(b.x + w * 0.7f, b.y + 5.0f * s), IM_COL32(15, 15, 20, 170), 2.0f);
-        dl->AddRectFilled(b, ImVec2(b.x + w * 0.7f * r, b.y + 5.0f * s), IM_COL32(150, 110, 230, 235), 2.0f);
-    }
-    const ImVec2 sp(40.0f * s, display.y - 70.0f * s); // spirit set (bottom left)
-    for (int k = 0; k < 3; ++k) {
-        const char* id = v.spirits[std::clamp(v.summon_set, 1, 2) - 1][k];
-        std::snprintf(txt, sizeof(txt), "%s", id[0] ? id : "-");
-        dl->AddRectFilled(ImVec2(sp.x + k * 64.0f * s, sp.y), ImVec2(sp.x + k * 64.0f * s + 56.0f * s, sp.y + 28.0f * s), IM_COL32(18, 16, 20, 170), 4.0f);
-        dl->AddText(ImVec2(sp.x + k * 64.0f * s + 6.0f * s, sp.y + 5.0f * s), IM_COL32(230, 220, 200, 230), txt);
-    }
-}
-
 void draw_debug(Control* c, const ImVec2& display, bool guest_fresh) {
     HostCounters hk{};
     GuestCounters gk{};
@@ -674,7 +662,9 @@ void render_frame(IDXGISwapChain* swap) {
     FrameMeta fm{};
     const bool guest_fresh = c->frame.read(fm) && heartbeat_alive(fm.frame_ms, clock::now_ms(), facts::kHeartbeatTimeoutMs);
     ID3D11ShaderResourceView* srv = (guest_fresh && g_toggles.bridge_on) ? guest_srv(fm) : nullptr;
-    ID3D11ShaderResourceView* cap = (guest_fresh && g_toggles.bridge_on) ? chars_srv(fm) : nullptr;
+    const bool bridged = guest_fresh && g_toggles.bridge_on;
+    ID3D11ShaderResourceView* cap = bridged ? shared_srv(fm.chars_handle, g_r.opened_chars, g_r.chars_tex, g_r.chars_srv, L"scene-capture alpha") : nullptr;
+    ID3D11ShaderResourceView* hud = bridged ? shared_srv(fm.hud_handle, g_r.opened_hud, g_r.hud_tex, g_r.hud_srv, L"EL HUD") : nullptr;
     KeyCB cb{};
     if (srv) {
         cb.texel_x = 1.0f / static_cast<float>(g_r.gw);
@@ -705,6 +695,9 @@ void render_frame(IDXGISwapChain* swap) {
             blit(g_r.world_rtv, facts::kWorldRtWidth, facts::kWorldRtHeight, g_r.ps_world, srv, cap, cb, false);
         }
         if (kind != FrameKind::World && g_r.ps_menu) blit(g_r.back_rtv, desc.BufferDesc.Width, desc.BufferDesc.Height, g_r.ps_menu, srv, cap, cb, true);
+        // EL's own HUD in EM screen space, while Lily plays (EM menus / EL menus own the screen otherwise)
+        if (hud && kind == FrameKind::World && ctx == Ctx::Gameplay && g_world_active && g_r.ps_hud)
+            blit(g_r.back_rtv, desc.BufferDesc.Width, desc.BufferDesc.Height, g_r.ps_hud, hud, nullptr, cb, true);
     }
 
     ImGui::SetCurrentContext(g_r.imgui);
@@ -723,7 +716,6 @@ void render_frame(IDXGISwapChain* swap) {
     Vitals v{};
     c->vitals.read(v);
     if (overlay) draw_panel(v, io.DisplaySize);
-    if (ctx == Ctx::Gameplay && g_world_active) draw_hud(v, io.DisplaySize);
     {
         std::scoped_lock lk(g_toast.m);
         auto* fg = ImGui::GetForegroundDrawList();
@@ -817,6 +809,7 @@ void shutdown() {
     for (IUnknown** p : std::initializer_list<IUnknown**>{
              reinterpret_cast<IUnknown**>(&g_r.world_rtv), reinterpret_cast<IUnknown**>(&g_r.back_rtv), reinterpret_cast<IUnknown**>(&g_r.guest_srv),
              reinterpret_cast<IUnknown**>(&g_r.guest_tex), reinterpret_cast<IUnknown**>(&g_r.chars_srv), reinterpret_cast<IUnknown**>(&g_r.chars_tex),
+             reinterpret_cast<IUnknown**>(&g_r.hud_srv), reinterpret_cast<IUnknown**>(&g_r.hud_tex), reinterpret_cast<IUnknown**>(&g_r.ps_hud),
              reinterpret_cast<IUnknown**>(&g_r.panel_srv), reinterpret_cast<IUnknown**>(&g_r.panel_tex),
              reinterpret_cast<IUnknown**>(&g_r.vs), reinterpret_cast<IUnknown**>(&g_r.ps_world),
              reinterpret_cast<IUnknown**>(&g_r.ps_menu), reinterpret_cast<IUnknown**>(&g_r.cb), reinterpret_cast<IUnknown**>(&g_r.sampler),

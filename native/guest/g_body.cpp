@@ -295,6 +295,7 @@ void reset_anchor() {
     terrain_reset();
     combat_reset();
     capture_reset();
+    hud_reset();
     if (Control* c = ctl()) c->map.store(g.map);
 }
 
@@ -964,6 +965,7 @@ void tick() {
         if (live && mode == facts::el::kMoveFalling) ++g.k.falling_frames;
     }
     publish_projection(pc, {loc.x, loc.y, foot});
+    hud_tick(pc); // after the capture: its RT grab goes first
     const bool slow = g.slow.due(now);
     const std::wstring anim = current_anim(pawn);
     publish_vitals(pc, pawn, anim, slow);

@@ -1,6 +1,7 @@
 // Black studio (FR-HDL-1/2/3/6): every EL actor that is not Lily, her spirits, their abilities, engine
 // infrastructure or one of our own mirror objects is hidden and loses collision, once at anchor time and
-// then incrementally from BeginPlay. EL world services (HUD, BGM, ambience, shake) are switched off and
+// then incrementally from BeginPlay. EL world services (damage numbers, BGM, ambience, shake) are switched off
+// (the player HUD is g_hud's: it leaves the viewport for its own channel) and
 // the EL window lives off-screen (never minimised: a minimised UE4 window stops presenting).
 
 #include "guest/guest.h"
@@ -133,7 +134,8 @@ void stage_on_begin_play(UObject* actor) {
 void stage_headless(UObject* pc, UObject* lily) {
     for (const wchar_t* cmd : {L"r.BloomQuality 0", L"r.VSync 0", L"t.MaxFPS 60"}) ue::console(pc, cmd);
     if (UObject* gs = ue::first(L"GameSettingsSubsystem")) {
-        for (const wchar_t* fn : {L"SetDisplayPlayerUI", L"SetDisplayDamageValues", L"SetDisplayHealValues", L"SetDisplayEnemyFloatingGauges",
+        // DisplayPlayerUI is left to g_hud: the PlayerUI leaves the viewport for the HUD channel first
+        for (const wchar_t* fn : {L"SetDisplayDamageValues", L"SetDisplayHealValues", L"SetDisplayEnemyFloatingGauges",
                                   L"SetUseCameraShake", L"SetUseForceFeedback", L"SetEnableDamageAreaPostProcess"}) {
             Call(gs, fn).b(false).go();
         }

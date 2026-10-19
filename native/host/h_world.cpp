@@ -63,9 +63,11 @@ constexpr int kBenchFastTravelPage = 7;
 constexpr double kBenchSnapMin = 1.0;
 constexpr const wchar_t* kLilacTabs[] = {L"WBP_GameMenu_Tab_Equipment", L"WBP_GameMenu_Tab_Skills", L"WBP_GameMenu_Tab_Passives"};
 constexpr const wchar_t* kLilacPages[] = {L"WBP_GameMenu_Page_Equipment_C", L"WBP_GameMenu_Page_Skill_C", L"WBP_GameMenu_Page_Passive_C"};
-// FR-HUD-1: Lilac-only parts of WBP_PlayerUI (currency and EXP stay: world services)
+// FR-HUD-1: Lilac-only parts of WBP_PlayerUI (currency stays: world service). Lily's own HUD (EL's
+// WBP_PlayerUI incl. her level) comes over the HUD channel, so Lilac's level diamond / EXP bar go too.
 constexpr const wchar_t* kLilacHud[] = {
     L"WBP_PlayerHPGauge", L"WBP_PlayerSPGauge", L"WBP_SkillSet", L"WBP_HealingItems", L"WBP_LowHPFeedback", L"LowHPFeedbackOverlay", L"WBP_StatusEffects",
+    L"WBP_EXPGauge",
 };
 // [POLICY] interaction reach around Lily's feet when she presses Interact
 constexpr double kInteractRadius = 200.0;

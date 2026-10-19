@@ -10,8 +10,8 @@
 | 版本相关二进制数据 | `data/binary/{EL,EM}.json` | SHA-256、RVA + 前缀、原生偏移；运行时由 `rt/binary.*` 读取；`tools/verify_binary.py` 离线校验 |
 | 核心（纯 C++，有单测） | `native/core/*.h` | 协议 `protocol.h`、映射 `frame_map.h`、键位 `input_map.h`、姿态环 `pose_ring.h`、地形合并 `terrain_merge.h`、伤害换算 `combat_map.h`、事实 `facts.h` |
 | 运行时基础 | `native/rt/*` | 共享内存、hook、反射调用 `ue.*`（支持按位置或按参数名传参）、输入、D3D |
-| Guest | `native/guest/*` | `g_body` 主循环 / 映射 / 发布；`g_terrain` 盒池；`g_combat` 代理 / 受击；`g_stage` 摄影棚；`g_input`；`g_frame` |
-| Host | `native/host/*` | `h_world` 编排 / 上下文 / 菜单 / 锁定 / 面片；`h_input` 键位读取与合成（`docs\INPUT_MATRIX.md`）；`h_puppet`；`h_terrain`；`h_combat`；`h_render` |
+| Guest | `native/guest/*` | `g_body` 主循环 / 映射 / 发布；`g_terrain` 盒池；`g_combat` 代理 / 受击；`g_stage` 摄影棚；`g_input`；`g_frame` 帧 / 共享纹理导出；`g_capture` SceneCapture 真 alpha；`g_hud` EL HUD 通道（WidgetComponent） |
+| Host | `native/host/*` | `h_world` 编排 / 上下文 / 菜单 / 锁定 / 面片；`h_input` 键位读取与合成（`docs\INPUT_MATRIX.md`）；`h_puppet`；`h_terrain`；`h_combat`；`h_render` 世界层 / 菜单 / EL HUD 合成 + ImGui 面板 |
 | 命令 | `build.bat [core] [test]`、`tools/{deploy,start,stop,eval,capture}.ps1` | 路径只来自 `devconfig.json` |
 
 ## 0.5 EL 无头引擎（摄影棚）现状
@@ -68,7 +68,8 @@
 - [ ] EM 对莱拉克施加的推动（风、传送带）。
 
 ### S5 HUD 与画面
-- [ ] 莉莉 HUD 目前是 ImGui 简易版（HP 条、祈祷、奥义槽、精灵 ID 文本）。需要换成 EL 原版贴图和排版（贴图经 CUE4Parse 提取，可参考 `D:\CodeT\ELMP\tools\icons\extract.ps1`），并显示精灵剩余次数 / 冷却（`Vitals.slots` 字段已留好，Guest 还没有填）。
+- [x] 莉莉 HUD 改为 EL 原生 `WBP_PlayerUI` 图形学透传（2026-10-19，`docs\TRUE_ALPHA.md` 第 7 节）：PlayerUI 移入 `UWidgetComponent`，画进 RGBA16F 透明 RT（真 alpha）→ `FrameMeta::hud_handle` → Host 屏幕空间合成。ImGui 简易 HUD 已删除；莱拉克的等级 / 经验条（`WBP_EXPGauge`）在莉莉模式下也隐藏。
+  - 待观察：EL HUD 的按键提示显示 EL 自己的绑定（如祈祷 `R`，实际被 EM 小地图键覆盖）；HUD 分辨率固定为设计尺寸（1080p），EM 更高分辨率时放大采样。
 - [x] 抠像已替换为真 alpha 通道（2026-10-19，详见 `docs\TRUE_ALPHA.md`）：Guest `USceneCaptureComponent2D`（`SCS_SceneColorHDR` → 预乘 RGB + inv-opacity A）经第二块共享纹理发 Host，`s = bb.rgb / cov`。`keyed()` 保留为 capture 未就绪时的回退。
 - [x] 加法 / Bloom / HDR 特效光补漏（2026-10-19，`docs\TRUE_ALPHA.md` 第 6 节）：Additive 材质与后处理在 capture 里没有覆盖率，`covered()` 改为 `a = max(cov, peak(bb))`，光不再丢失或截断。
 - [ ] 扭曲特效（`M_Yugami100` 等 `bUsesDistortion` 材质，如 S5000）只扭曲 EL 黑摄影棚，EM 背景不扭曲；alpha 通道无法承载，需在 EM 侧重建。
@@ -117,7 +118,7 @@
     - 做法照抄 EL 自己的非 PC 分支（`SetupSettings` 里 `IsPCBuild` 为假时）：Construct 后 `GraphicsTab` / `WBP_Settings_Graphics` `RemoveFromParent`，并从 `TabArray` 删掉该项（`g_body.cpp` post-Construct）。实测正反循环 游戏→声音→控制器→键盘 回绕正确，关闭重开幂等。Apply / Reset / 分辨率 / 模式 / 缩放五个处理器仍在 `kBlockedScoped` 里兜底。
     - 页签的鼠标点击处理器写死了 `SelectTab(0..4)`：画面页移除后，控制器 / 键盘的索引都前移了一位。Host 不向 EL 转发鼠标，所以目前触发不了；以后要转发鼠标时，得按 `TabArray` 重新映射。
   - 需同步：**音量**（EL 的 BGM / 环境音已被静音，莉莉的音效仍走 EL 音量）、**语言**（EL 菜单文字）——建议跟随 EM 的设置，而不是两边各自设置。
-  - 待定：伤害数字 / HUD 显示等 EL 游戏性选项（EL HUD 已关闭，大多无效果）。
+  - 待定：伤害数字 / 敌人血条等 EL 游戏性选项（伤害数字、敌人浮动血条仍由 `stage_headless` 关闭，大多无效果）；"显示玩家 UI" 由 `g_hud` 强制打开（EL HUD 走 HUD 通道透传），关掉也会被改回。
 - [ ] 直开菜单 `MenuKind::Spirits/Relics/Strengthen` 现仅 debug `menu2/3/4` 使用；`MenuKind::Rest` 已改为直接创建，不再依赖 EL 地图里的 `BP_Interactable_RestingPoint_C`。
 - [ ] `WBP_MainMenu` 的 A/D 翻页按钮可能仍能翻到 Map 页：目前只把 Map 页签设为 Collapsed，`GoToPage` 循环是否跳过未验证；Record / Collection / Tips 页显示的也是 EL 存档内容，与 EM 世界是否冲突待确认。
 - [ ] `SetCanChangeEquipment` 目前开直开菜单时置 true 后没有还原；需要确认关闭菜单后该标记残留是否有副作用（参考 OPMod 的做法）。

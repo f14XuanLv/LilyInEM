@@ -19,7 +19,7 @@
 namespace lie {
 
 inline constexpr std::uint32_t kMagic = 0x4D45494Cu; // "LIEM"
-inline constexpr std::uint32_t kProtocol = 6;
+inline constexpr std::uint32_t kProtocol = 7;
 inline constexpr const wchar_t* kControlShmName = L"Local\\LilyInEM_Control_v1";
 inline constexpr const wchar_t* kWorldShmName = L"Local\\LilyInEM_World_v1";
 
@@ -173,6 +173,10 @@ struct FrameMeta {                  // G, published from Present
     // in A, so coverage = 1 - a). The Host unpremultiplies the back buffer RGB by it: s = bb.rgb / cov.
     // 0 while the capture is not running yet -> Host falls back to luminance keying.
     std::uint64_t chars_handle = 0;
+    // Third shared texture: EL's HUD (WBP_PlayerUI) painted by a UWidgetComponent into an RGBA16F target cleared
+    // to transparent -> linear premult RGB + real coverage A, sized in EL's 1920x1080 design units at the frame's
+    // aspect. The Host composites it in EM screen space. 0 while the HUD channel is not live.
+    std::uint64_t hud_handle = 0;
     std::uint32_t width = 0, height = 0;
     float foot_u = 0.5f, foot_v = 0.5f;   // Lily's foot in the exported frame
     float view_w_uu = 0.0f, view_h_uu = 0.0f; // world extent of the frame at Lily's depth
