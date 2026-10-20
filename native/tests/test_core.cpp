@@ -7,6 +7,7 @@
 #include "core/pose_ring.h"
 #include "core/projection.h"
 #include "core/protocol.h"
+#include "core/terrain_kinds.h"
 #include "core/terrain_merge.h"
 
 #include <cmath>
@@ -118,6 +119,18 @@ static void test_terrain() {
     iv = lie::terrain::column_intervals({{200, A}, {100, B}}, {{100, A}, {0, B}}, -500, 1000);
     CHECK(iv.size() == 1 && near(iv[0].lo, 0) && near(iv[0].hi, 200));
 
+    // open shell A (faces at 600 and 100, hollow inside) next to a solid floor B [-100, 0]
+    auto comps = lie::terrain::component_intervals({{600, A}, {0, B}}, {{100, A}, {-100, B}}, -500, 1000);
+    auto hollow_a = [&](std::uint64_t c, double) { return c != A; };
+    iv = lie::terrain::resolve_shells(comps, -500, 1000, hollow_a);
+    CHECK(iv.size() == 3 && near(iv[0].lo, -100) && near(iv[0].hi, 0));
+    CHECK(near(iv[1].lo, 100) && near(iv[1].hi, 100 + lie::terrain::kShellThickness));
+    CHECK(near(iv[2].lo, 600 - lie::terrain::kShellThickness) && near(iv[2].hi, 600));
+    // a hollow shell containing the window top keeps only its real (bottom) face
+    comps = lie::terrain::component_intervals({{0, A, true}}, {{400, A}}, -500, 1000);
+    iv = lie::terrain::resolve_shells(comps, -500, 1000, hollow_a);
+    CHECK(iv.size() == 1 && near(iv[0].lo, 400) && near(iv[0].hi, 400 + lie::terrain::kShellThickness));
+
     // flat floor over 10 columns + a 3-column wall -> 2 rectangles
     const double dy = 16.0;
     std::vector<lie::terrain::Column> cols;
@@ -146,6 +159,37 @@ static void test_terrain() {
         const double top_center_z = slab.z + std::cos(ang) * slab.hz;
         const double z_on_face = top_center_z + (y - top_center_y) * std::tan(ang);
         CHECK(near(z_on_face, 100.0 + i * step, 0.05));
+    }
+
+    // floating 22-UU plank rising at 19 degrees over 40 columns: no fill box, slab keeps the plank's thickness
+    cols.clear();
+    const double pstep = dy * std::tan(19.0 * 3.14159265358979323846 / 180.0);
+    for (int i = 0; i < 40; ++i) cols.push_back({i * dy, {{300.0 + i * pstep, 322.0 + i * pstep}}});
+    rects = lie::terrain::merge_columns(cols, dy);
+    CHECK(rects.size() == 1);
+    const auto& plank = rects[0];
+    const double pang = plank.roll_deg * 3.14159265358979323846 / 180.0;
+    for (int i = 0; i < 40; ++i) {
+        const double y = i * dy;
+        const double bottom_center_y = plank.y + std::sin(pang) * plank.hz;
+        const double bottom_center_z = plank.z - std::cos(pang) * plank.hz;
+        const double z_on_bottom = bottom_center_z + (y - bottom_center_y) * std::tan(pang);
+        CHECK(z_on_bottom >= 300.0 + i * pstep - 0.05);
+    }
+
+    // registry: subclasses of AOneWayPlatform must be listed before it (first IsA match wins)
+    {
+        using namespace lie::terrain;
+        auto index_of = [](std::wstring_view cls) {
+            for (std::size_t i = 0; i < std::size(kMechanisms); ++i) {
+                if (cls == kMechanisms[i].em_class) return static_cast<int>(i);
+            }
+            return -1;
+        };
+        const int one_way = index_of(L"/Script/Zion.OneWayPlatform");
+        CHECK(one_way >= 0 && index_of(L"/Script/Zion.MovingPlatform_Elevator") < one_way && index_of(L"/Script/Zion.MovingPlatform_Spline") < one_way);
+        for (const auto& r : kMechanisms) CHECK((r.flags & lie::kTerrainSolid) != 0);
+        CHECK(mirror_of(lie::kTerrainSolid | lie::kTerrainOneWay) == Mirror::OneWay && mirror_of(kStaticFlags) == Mirror::Box);
     }
 
     std::vector<lie::TerrainRect> many;

@@ -30,7 +30,11 @@ inline constexpr int kChannelWorldStatic = 0;
 inline constexpr int kChannelOneWay = 17;
 
 // [CUE4P] native blueprint classes / tables reused as-is
+// BP_OneWayPlatform_C: root StaticMeshComponent (Cube_BottomOrigin, 100 UU cube with its origin at the bottom
+// face, ObjectType 17) + child BoxComponent "Box" straddling the bottom face; a PlayerPawn overlapping Box gets
+// IgnoreComponentWhenMoving(root) until it leaves (jump-through from below, UCA_FallThrough drop-through).
 inline constexpr const wchar_t* kOneWayPlatformClass = L"/Game/_Zenith/Gameplay/LevelBlocks/BP_OneWayPlatform.BP_OneWayPlatform_C";
+inline constexpr double kOneWayMeshHalf = 50.0; // Cube_BottomOrigin: X/Y in [-50, 50], Z in [0, 100]
 inline constexpr const wchar_t* kSpiritTable = L"/Game/_Zenith/Gameplay/Data/DT_Items_Spirits.DT_Items_Spirits";
 inline constexpr const wchar_t* kPassiveTable = L"/Game/_Zenith/Gameplay/Data/DT_Items_Passives.DT_Items_Passives";
 
@@ -47,6 +51,7 @@ inline constexpr int kMoveFalling = 3;              // [UE] EMovementMode::MOVE_
 namespace em {
 inline constexpr const wchar_t* kExe = L"EnderMagnoliaSteam-Win64-Shipping.exe";
 inline constexpr const wchar_t* kLilacClass = L"BP_p0000_Lilac_C";
+// EM collision mechanisms (one-way, moving, breakable): core/terrain_kinds.h
 // [CUE4P] parent M_Spine_Character: Unlit / Translucent / TwoSided, texture parameter SpriteTexture
 inline constexpr const wchar_t* kSpineMaterial = L"/Game/_Zion/Materials/Common/MI_Spine_Character.MI_Spine_Character";
 // [SDK] EFaction (Zion)

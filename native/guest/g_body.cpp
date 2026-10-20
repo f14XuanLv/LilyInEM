@@ -165,7 +165,7 @@ struct State {
     std::vector<ue::Weak> menus;
     pose::FrameTimer<120> frame_timer;
     GuestCounters k{};
-    clock::Every title_try{1.5}, title_check{0.5}, pc_lookup{1.0}, slow{0.25}, counters_pub{0.25}, res_poll{0.5}, ui_keys{2.0};
+    clock::Every title_try{1.5}, title_check{0.5}, pc_lookup{1.0}, slow{0.25}, counters_pub{0.25}, res_poll{0.5}, ui_keys{2.0}, cursor_pin{1.0};
     std::uint32_t res_w = 0, res_h = 0; // last frame size the Host asked for (guest_res_w/h)
     int wake_taps = 0;
     double next_wake = 0.0;
@@ -862,6 +862,10 @@ void tick() {
         g.pc.set(ue::first(L"ZenithPlayerController"));
         pc = g.pc.get();
     }
+    // Headless: EL never owns a mouse, but states keep re-raising bShowMouseCursor. Left on, Slate draws a
+    // software cursor tracking the OS cursor through the off-screen window -> a pointer trapped in the
+    // top-right of the composited frame.
+    if (pc && g.cursor_pin.due(now) && ue::flag(pc, L"bShowMouseCursor", false)) ue::set_flag(pc, L"bShowMouseCursor", false);
     // The Host publishes the EL frame size it wants (EM back buffer x its res scale). r.setres would
     // clamp to the desktop (1707x1067 logical on a 2560x1600/150% display), so we resize the off-screen
     // window raw: WM_SIZE -> swap chain ResizeBuffers -> shared textures + capture RT rebuilt.

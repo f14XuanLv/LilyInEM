@@ -75,6 +75,7 @@ constexpr double kInteractRadius = 200.0;
 struct State {
     ue::Weak pc, pawn, rt, mid, quad;
     bool locked = false;
+    bool locked_by_event = false;   // the lock is released because an EM event owns Lilac
     bool active = false;
     bool resting = false;
     bool paused_by_us = false;
@@ -149,7 +150,8 @@ void assert_lock(UObject* pc, UObject* pawn) {
     if (UObject* m = movement(pawn)) Call(m, L"SetComponentTickEnabled").b(false).go();
 }
 
-void lock(UObject* pc, UObject* pawn, bool on) {
+// event = an EM event takes Lilac over (or gives her back): no mode toast, Lilac's spirits stay hidden
+void lock(UObject* pc, UObject* pawn, bool on, bool event = false) {
     if (on && !g.locked) {
         assert_lock(pc, pawn);
         for (const wchar_t* s : {L"Summon", L"SummonIdleSpirit"}) {
@@ -159,8 +161,8 @@ void lock(UObject* pc, UObject* pawn, bool on) {
         sweep_spirits(true);
         for (const wchar_t* cmd : {L"r.VSync 0", L"t.MaxFPS 60"}) ue::console(pc, cmd);
         g.locked = true;
-        log::info(L"Lily mode: Lilac locked out");
-        render::toast("莉莉模式 Lily Mode");
+        log::info(event ? L"EM event over: Lilac locked out again" : L"Lily mode: Lilac locked out");
+        if (!event) render::toast("莉莉模式 Lily Mode");
     } else if (!on && g.locked) {
         if (UObject* m = movement(pawn)) {
             ue::set_vec(m, L"Velocity", {});
@@ -170,10 +172,14 @@ void lock(UObject* pc, UObject* pawn, bool on) {
             if (UObject* c = ue::obj(pawn, n)) Call(c, L"SetComponentTickEnabled").b(true).go();
         }
         Call(pawn, L"EnableInput").o(pc).go();
-        sweep_spirits(false);
         g.locked = false;
-        log::info(L"Lilac mode: native control restored");
-        render::toast("莱拉克模式 Lilac Mode");
+        if (event) {
+            log::info(L"EM event: Lilac handed to EM");
+        } else {
+            sweep_spirits(false);
+            log::info(L"Lilac mode: native control restored");
+            render::toast("莱拉克模式 Lilac Mode");
+        }
     }
     // EM events re-enable input / components on Lilac: re-assert
     if (g.locked && g.relock.due(clock::now_s())) assert_lock(pc, pawn);
@@ -450,6 +456,8 @@ void deactivate(UObject* pc, UObject* pawn) {
     }
     if (pawn) {
         lock(pc, pawn, false);
+        if (g.locked_by_event) sweep_spirits(false); // released quietly by an event: Lilac mode shows them again
+        g.locked_by_event = false;
         set_lilac_visible(pawn, true);
         if (g.hud_hidden) hide_lilac_hud(pc, false);
     }
@@ -515,6 +523,7 @@ void tick_pre(float) {
         g.pawn.set(pawn);
         g.quad.reset();
         g.locked = false;
+        g.locked_by_event = false;
         g.active = false;
         puppet_reset();
         terrain_reset();
@@ -540,7 +549,11 @@ void tick_pre(float) {
 
     const bool lily_shown = g.active && guest_ready() && (!in_event || lily_event);
     if (g.active) {
-        lock(pc, pawn, true);
+        // EM events script Lilac herself (walk to talk distance, turn, root motion): they own her and her movement
+        // must run, or MoveTo never completes. Afterwards the puppet sees EM's move and rebases Lily onto it.
+        const bool em_event = in_event && !lily_event;
+        lock(pc, pawn, !em_event, em_event || g.locked_by_event);
+        g.locked_by_event = em_event;
         set_lilac_visible(pawn, !lily_shown || g.flags.show_lilac);
         if (g.hud.due(now) || !g.hud_hidden) hide_lilac_hud(pc, lily_shown);
 

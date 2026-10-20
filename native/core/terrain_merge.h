@@ -49,8 +49,13 @@ inline std::vector<Interval> union_intervals(std::vector<Interval> in) {
     return out;
 }
 
+struct ComponentIntervals {
+    std::uint64_t component = 0;
+    std::vector<Interval> solids; // as reconstructed from the faces: assumes the shape is a closed volume
+};
+
 // tops: hits of the downward trace (window top -> bottom); bottoms: hits of the upward trace.
-inline std::vector<Interval> column_intervals(const std::vector<Face>& tops, const std::vector<Face>& bottoms, double z_min, double z_max) {
+inline std::vector<ComponentIntervals> component_intervals(const std::vector<Face>& tops, const std::vector<Face>& bottoms, double z_min, double z_max) {
     struct Ev {
         double z;
         int delta; // +1 entering going down (top face), -1 leaving (bottom face)
@@ -71,24 +76,54 @@ inline std::vector<Interval> column_intervals(const std::vector<Face>& tops, con
     }
     for (const auto& [c, d] : start_depth) per_comp[c];
 
-    std::vector<Interval> all;
+    std::vector<ComponentIntervals> out;
     for (auto& [comp, evs] : per_comp) {
         std::sort(evs.begin(), evs.end(), [](const Ev& a, const Ev& b) { return a.z != b.z ? a.z > b.z : a.delta > b.delta; });
         const std::uint32_t flags = comp_flags[comp];
         int depth = start_depth.count(comp) ? std::max(1, start_depth[comp]) : 0;
         double open_hi = z_max;
+        ComponentIntervals ci{comp, {}};
         for (const Ev& e : evs) {
             if (e.delta > 0) {
                 if (depth++ == 0) open_hi = e.z;
             } else if (depth == 0) {
-                all.push_back({e.z, z_max, flags}); // exit without entry: the shape contains the window top
+                ci.solids.push_back({e.z, z_max, flags}); // exit without entry: the shape contains the window top
             } else if (--depth == 0) {
-                all.push_back({e.z, open_hi, flags});
+                ci.solids.push_back({e.z, open_hi, flags});
             }
         }
-        if (depth > 0) all.push_back({z_min, open_hi, flags}); // still inside at the window bottom
+        if (depth > 0) ci.solids.push_back({z_min, open_hi, flags}); // still inside at the window bottom
+        out.push_back(std::move(ci));
+    }
+    return out;
+}
+
+// [POLICY] thickness given to an open surface (shell) when it is mirrored: enough to stand on / bump into
+inline constexpr double kShellThickness = 8.0;
+
+// The face reconstruction assumes closed volumes. An open surface (triangle-mesh collision, single-sided
+// shell) crossing the column yields an interval whose inside is empty space. `inside(component, z)` asks the
+// engine whether z lies inside that component's own shape; an interval that is not solid at its middle keeps
+// only its real faces (not the ones clamped to the window) as thin slabs, which is all Lilac collides with.
+template <class InsideFn>
+std::vector<Interval> resolve_shells(const std::vector<ComponentIntervals>& comps, double z_min, double z_max, InsideFn&& inside) {
+    std::vector<Interval> all;
+    for (const ComponentIntervals& c : comps) {
+        for (const Interval& iv : c.solids) {
+            if (iv.hi - iv.lo <= 2.0 * kShellThickness || inside(c.component, (iv.lo + iv.hi) * 0.5)) {
+                all.push_back(iv);
+                continue;
+            }
+            if (iv.hi < z_max - kTol) all.push_back({iv.hi - kShellThickness, iv.hi, iv.flags});
+            if (iv.lo > z_min + kTol) all.push_back({iv.lo, iv.lo + kShellThickness, iv.flags});
+        }
     }
     return union_intervals(std::move(all));
+}
+
+// All shapes treated as closed volumes.
+inline std::vector<Interval> column_intervals(const std::vector<Face>& tops, const std::vector<Face>& bottoms, double z_min, double z_max) {
+    return resolve_shells(component_intervals(tops, bottoms, z_min, z_max), z_min, z_max, [](std::uint64_t, double) { return true; });
 }
 
 struct Column {
@@ -160,10 +195,11 @@ inline std::vector<TerrainRect> merge_columns(const std::vector<Column>& cols, d
         for (std::size_t c : chain) consumed[c] = true;
         const Run& f = closed[chain.front()];
         const Run& l = closed[chain.back()];
-        double floor_hi = 1e30, floor_lo = -1e30;
+        double floor_hi = 1e30, floor_lo = -1e30, min_thick = 1e30;
         for (std::size_t c : chain) {
             floor_hi = std::min(floor_hi, closed[c].iv.hi);
             floor_lo = std::max(floor_lo, closed[c].iv.lo);
+            min_thick = std::min(min_thick, closed[c].iv.hi - closed[c].iv.lo);
         }
         const double y0 = col_y0(f.first), y1 = col_y1(l.last);
         emit_box(y0, y1, floor_lo, floor_hi, f.iv.flags);
@@ -174,7 +210,9 @@ inline std::vector<TerrainRect> merge_columns(const std::vector<Column>& cols, d
         const double len = std::hypot(yb - ya, zb - za);
         const double ang = std::atan2(zb - za, yb - ya);
         const double rise = std::abs(zb - za);
-        const double half_t = std::max(1.0, rise * std::cos(ang) * 0.5 + 1.0);
+        // the slab fills the wedge above the fill box (rise), but never reaches below the thinnest column:
+        // a floating thin slope (plank, sloped one-way platform) keeps its real thickness
+        const double half_t = std::max(1.0, std::min(rise * std::cos(ang) * 0.5 + 1.0, min_thick * std::cos(ang) * 0.5));
         const double nx = -std::sin(ang), nz = std::cos(ang); // upward normal of the top line
         TerrainRect slab{};
         slab.y = static_cast<float>((ya + yb) * 0.5 - nx * half_t);

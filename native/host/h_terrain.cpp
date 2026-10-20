@@ -4,13 +4,17 @@
 // EM camera's visible extent. Each column is two LineTraceMultiForObjects (down: top faces, up: bottom faces);
 // verified live 2026-10-17: every shape on the ray returns one entry hit, origins inside a shape come back with
 // bStartPenetrating. A hit counts as terrain only if Lilac and the component BLOCK each other (both responses,
-// read at runtime from the live capsule), which removes triggers, sound/design volumes and characters.
+// read at runtime from the live capsule, the same rule a capsule sweep applies), which removes triggers,
+// sound/design volumes and characters. Behaviour (one-way, moving, breakable) comes from the single registry
+// core/terrain_kinds.h. Every reconstructed interval is checked against its own component's shape
+// (K2_SphereOverlapComponent): open surfaces keep only their faces (terrain::resolve_shells).
 // Columns are refreshed round-robin under a per-frame time budget; a new revision is published only when
-// the merged rectangle set actually changes.
+// the merged rectangle set actually changes. tools\collision_check.ps1 diffs EM against the EL mirror.
 
 #include "host/host.h"
 
 #include "core/facts.h"
+#include "core/terrain_kinds.h"
 #include "core/terrain_merge.h"
 #include "rt/clock.h"
 #include "rt/log.h"
@@ -43,6 +47,11 @@ constexpr int kMinColumnsPerTick = 2;
 // [POLICY] a fully scanned column is refreshed after this long (doors, breakable walls, moving blocks)
 constexpr double kRefreshSeconds = 1.0;
 constexpr int kBlock = 2; // [UE] ECollisionResponse::ECR_Block
+// [POLICY] verdicts (does this component block Lilac, which mechanism) are re-read this often: doors and
+// breakables change their responses at runtime
+constexpr double kVerdictSeconds = 2.0;
+// [POLICY] probe radius for "is this point inside the component's own shape"
+constexpr double kInsideProbeRadius = 1.0;
 
 struct Column {
     double scanned_at = 0.0;
@@ -50,9 +59,16 @@ struct Column {
     std::vector<terrain::Interval> solids;
 };
 
+struct Verdict {
+    ue::Weak comp; // a recycled address is a different component
+    int flags = 0; // 0 = not terrain, otherwise TerrainFlags
+};
+
 struct State {
     std::map<long long, Column> cols;
-    std::unordered_map<const UObject*, int> verdict; // component -> 0 ignore / flags
+    std::unordered_map<const UObject*, Verdict> verdict;
+    double verdict_at = 0.0;
+    std::vector<std::pair<UClass*, const terrain::MechanismRule*>> rules; // registry order, resolved classes
     int lilac_type = -1;
     int lilac_resp[32]{};
     bool have_profile = false;
@@ -67,6 +83,7 @@ struct State {
     std::size_t cost_i = 0;
     std::unique_ptr<TerrainSnapshot> snap = std::make_unique<TerrainSnapshot>();
     UClass* character = nullptr;
+    std::uint32_t shells = 0; // intervals resolved as open surfaces (status)
 } g;
 
 void read_profile(UObject* pawn) {
@@ -79,24 +96,40 @@ void read_profile(UObject* pawn) {
     }
     g.have_profile = g.lilac_type >= 0;
     g.character = ue::find_class(L"/Script/Engine.Character");
-    log::info(L"terrain: Lilac object type %d", g.lilac_type);
+    g.rules.clear();
+    for (const terrain::MechanismRule& r : terrain::kMechanisms) {
+        UClass* cls = ue::find_class(r.em_class);
+        if (!cls) log::error(L"terrain: mechanism class %s not found (rule inactive)", r.em_class);
+        g.rules.emplace_back(cls, &r);
+    }
+    log::info(L"terrain: Lilac object type %d, %zu mechanism rules", g.lilac_type, g.rules.size());
+}
+
+// Registry lookup: the first rule whose class the owner IsA, else plain static geometry
+std::uint32_t mechanism_flags(UObject* owner) {
+    for (const auto& [cls, rule] : g.rules) {
+        if (ue::is_a(owner, cls)) return rule->flags;
+    }
+    return terrain::kStaticFlags;
 }
 
 // 0 = not terrain, otherwise TerrainFlags
 int classify(UObject* comp) {
-    if (auto it = g.verdict.find(comp); it != g.verdict.end()) return it->second;
+    if (auto it = g.verdict.find(comp); it != g.verdict.end() && it->second.comp.get() == comp) return it->second.flags;
     int v = 0;
     const int t = static_cast<int>(ue::call_num(comp, L"GetCollisionObjectType", -1.0));
     Call back(comp, L"GetCollisionResponseToChannel");
     const bool blocks = t >= 0 && t < 32 && g.lilac_resp[t] == kBlock && back.i(g.lilac_type).go() && back.ri() == kBlock;
     UObject* owner = ue::call_obj(comp, L"GetOwner");
-    if (blocks && !ue::is_a(owner, g.character)) {
-        v = kTerrainSolid;
-        const std::wstring cls = ue::class_name(owner);
-        if (cls.find(L"OneWay") != std::wstring::npos) v |= kTerrainOneWay; // S4: native one-way pool on the Guest
-    }
-    g.verdict.emplace(comp, v);
+    if (blocks && !ue::is_a(owner, g.character)) v = static_cast<int>(mechanism_flags(owner));
+    g.verdict.insert_or_assign(comp, Verdict{ue::Weak(comp), v});
     return v;
+}
+
+// Is (x, y, z) inside the component's own collision shape (not just near its surface)?
+bool inside(UObject* comp, double x, double y, double z) {
+    Call c(comp, L"K2_SphereOverlapComponent");
+    return !c || (c.v({x, y, z}).f(kInsideProbeRadius).b(false).b(false).b(false).go() && c.rb()); // no probe: assume solid
 }
 
 std::vector<terrain::Face> trace(UObject* pawn, double x, double y, double z0, double z1) {
@@ -147,7 +180,11 @@ void scan(UObject* pawn, double plane_x, long long idx, double now) {
     const auto tops = trace(pawn, plane_x, y, z1, z0);
     const auto bottoms = trace(pawn, plane_x, y, z0, z1);
     Column& col = g.cols[idx];
-    auto solids = terrain::column_intervals(tops, bottoms, z0, z1);
+    auto solids = terrain::resolve_shells(terrain::component_intervals(tops, bottoms, z0, z1), z0, z1, [&](std::uint64_t id, double z) {
+        const bool solid = inside(reinterpret_cast<UObject*>(id), plane_x, y, z);
+        g.shells += solid ? 0u : 1u;
+        return solid;
+    });
     auto same = [](const std::vector<terrain::Interval>& a, const std::vector<terrain::Interval>& b) {
         if (a.size() != b.size()) return false;
         for (std::size_t i = 0; i < a.size(); ++i) {
@@ -219,6 +256,10 @@ void terrain_tick(UObject* pc, UObject* pawn) {
     const double t0 = clock::now_s();
     if (!g.have_profile) read_profile(pawn);
     if (!g.have_profile) return;
+    if (t0 - g.verdict_at > kVerdictSeconds) {
+        g.verdict.clear();
+        g.verdict_at = t0;
+    }
     const V3 l = ue::actor_location(pawn);
     const double hh = ue::num(ue::obj(pawn, L"CapsuleComponent"), L"CapsuleHalfHeight");
     update_window(pc, l, l.z - hh);
@@ -278,9 +319,9 @@ void terrain_reset() {
 bool terrain_ready() { return g.ready && g.revision > 0; }
 
 std::string terrain_status() {
-    char buf[200];
-    std::snprintf(buf, sizeof(buf), "terrain r%u rects=%zu cols=%zu window=[%lld,%lld] half=(%.0f,%.0f) ready=%d p99=%.3fms", g.revision, g.published.size(),
-                  g.cols.size(), g.first, g.last, g.half_w, g.half_h, g.ready, counters().terrain_ms_p99);
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "terrain r%u rects=%zu cols=%zu window=[%lld,%lld] half=(%.0f,%.0f) ready=%d shells=%u p99=%.3fms", g.revision,
+                  g.published.size(), g.cols.size(), g.first, g.last, g.half_w, g.half_h, g.ready, g.shells, counters().terrain_ms_p99);
     return buf;
 }
 

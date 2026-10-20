@@ -35,7 +35,14 @@
    - 排查：在 EL 侧把盒子画出来（`DrawDebugBox`），或导出 `TerrainSnapshot` 与 EM 射线结果对照。
 3. **列扫描的垂直窗口**：Lilac 垂直移动超过 1/4 窗口高度时，会把所有列标记为过期并全部重扫；扫完之前 `ready=false`。Guest 已放开时不受影响，但会短暂停止发布新地形。可以改成增量重扫。
 4. **区域切换后的大跳变**：EM 切换区域后，木偶会请求 rebase（以“当前莉莉脚底 ↔ 当前莱拉克脚底”为准）。如果切换时莉莉正在半空，会继续下落到新地形上。需要手动测试确认体验。
-5. **Lilac 碰撞类型缓存**：每个组件是否算作地形的判定（verdict）只在 `terrain_reset` 时清空。运行中改变碰撞响应的物体（机关门、可破坏墙）判定可能已过期。
+6. **EM 事件期间莱拉克归 EM**（2026-10-19，已实测通过）：非长椅事件（NPC 对话 `EventAction_MoveTo_TalkDistance` 等）会让莱拉克走位，锁定状态下移动组件不 Tick，MoveTo 永不完成、整段卡死。现在事件期间静默解锁（不提示、不显示莱拉克精灵），事件结束重新锁定，木偶检测到 EM 的移动后 rebase。NPC 对话全流程实测通过。
+7. **地形判定方法论**（2026-10-19）：
+   - 几何：互相 Block（与胶囊 sweep 同一规则）的组件都算地形；每个重建区间用 `K2_SphereOverlapComponent` 问该组件自己的形状，中点不在形状内 = 开放曲面，只保留真实表面为 8 UU 薄板（`terrain::resolve_shells`）。
+   - 行为：唯一登记处 `core/terrain_kinds.h`（单向、移动单向、移动块、可破坏），新机制只加表项。
+   - 缓存：verdict 每 2 s 过期，弱指针校验地址复用。
+   - 验证：`tools\collision_check.ps1` 差分 Oracle；Slum_001 起点区域 151×62 格不一致 0。待做：多区域巡检（含此前报告假障碍的位置）、把 Oracle 结果接进 verify 流程。
+5. ~~**Lilac 碰撞类型缓存**~~（已修，见问题 7「缓存」一行）：verdict 每 2 s 过期 + 弱指针校验，不再只在 `terrain_reset` 清空。
+8. ~~**右上角小鼠标指针**（2026-10-19 已修）：EL 的 `PC_Base_C.bShowMouseCursor` 会被 EL 状态置真；Slate 随即把"软件光标"画进 EL 帧缓冲，按真实 OS 光标位置换算进 off-screen 窗口坐标——EM 客户区整段映射到 EL 视口右上方（x≈49–89%、y≈2–41%），合成后看起来就是一个只能困在 EM 窗口右上角的小箭头。ESC 出 EM 菜单时 EM 的 ClipCursor 接管故看似"恢复正常"。修法：Guest 每秒把 `bShowMouseCursor` 钉回 false（`g_body.cpp` `cursor_pin`）；现场验证设置后 guest 捕获里指针消失。
 
 ## 2. 未实现功能（按阶段）
 
@@ -61,7 +68,8 @@
 - [ ] 实体普查只在激活时跑一次 `FindAllOf`，之后靠 BeginPlay 增量；rebase 或流式关卡加载后是否会漏掉敌人，需要确认。
 
 ### S4 场景机制
-- [ ] 单向平台：Guest 池化 `BP_OneWayPlatform_C`（对象类型 17），以支持 `UCA_FallThrough_C` 下穿。目前 `kTerrainOneWay` 被当作实心块。
+- [x] 单向平台（2026-10-19/20，已实测通过）：Host 按原生类 `/Script/Zion.OneWayPlatform`（`BP_FallThroughPlatform_C` 的父类；穿透是逐 Actor 忽略，扫描看不到）标 `kTerrainOneWay`；Guest 用 EL 原生 `BP_OneWayPlatform_C`（Cube_BottomOrigin 根组件，对象类型 17 + 底面 Box 触发器）独立成池，从下跳穿 / `UCA_FallThrough_C` 下穿都走 EL 原生规则。实测 Slum_001 斜木板跳穿与下蹲下穿均通过。
+- [x] 斜坡板厚度（2026-10-19）：`merge_columns` 的 slab 厚度不再按整段高差，封顶为链内最薄一列（悬空薄斜面不再向下膨胀成假障碍）。
 - [ ] 动平台 / 电梯（`AMovingPlatform_Elevator / _Spline`、`AMovingBlock_Elevator`）：进实体通道，在 EL 侧做成运动学盒，让莉莉原生跟随底座移动。目前它们被当作静态地形每秒重扫一次，而且木偶不会跟随底座。
 - [ ] 水体：`ACustomPhysicsVolumeWater`。
 - [ ] 钩爪点：`AHookPoint(_Moving)` 映射为 EL `AHookPoint` 代理。
