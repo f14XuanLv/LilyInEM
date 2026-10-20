@@ -43,6 +43,7 @@
    - 验证：`tools\collision_check.ps1` 差分 Oracle；Slum_001 起点区域 151×62 格不一致 0。待做：多区域巡检（含此前报告假障碍的位置）、把 Oracle 结果接进 verify 流程。
 5. ~~**Lilac 碰撞类型缓存**~~（已修，见问题 7「缓存」一行）：verdict 每 2 s 过期 + 弱指针校验，不再只在 `terrain_reset` 清空。
 8. ~~**右上角小鼠标指针**（2026-10-19 已修）：EL 的 `PC_Base_C.bShowMouseCursor` 会被 EL 状态置真；Slate 随即把"软件光标"画进 EL 帧缓冲，按真实 OS 光标位置换算进 off-screen 窗口坐标——EM 客户区整段映射到 EL 视口右上方（x≈49–89%、y≈2–41%），合成后看起来就是一个只能困在 EM 窗口右上角的小箭头。ESC 出 EM 菜单时 EM 的 ClipCursor 接管故看似"恢复正常"。修法：Guest 每秒把 `bShowMouseCursor` 钉回 false（`g_body.cpp` `cursor_pin`）；现场验证设置后 guest 捕获里指针消失。
+9. ~~**EL 无头窗口逃逸到桌面**（2026-10-20 已修）：`stage_window_tick` 的停驻是一次性的（`g_window_done` 闭锁），而且停驻发生在窗口仍是初始尺寸时——`request_frame_size` 随后以 `SWP_NOMOVE` 把窗口加宽到 3216，左缘不变、右缘一路伸回屏幕（实测 -1360..+1856，盖住整个桌面）；`WS_EX_TOOLWINDOW` 又让它没有任务栏图标。修法：去掉一次性闭锁，每次巡检都按当前宽度重算目标左缘 `SM_XVIRTUALSCREEN - w - 64`，任何漂移（含 UE 分辨率应用时回中）都重新停驻；exstyle 漂移一并重设。
 
 ## 2. 未实现功能（按阶段）
 

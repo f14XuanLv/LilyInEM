@@ -163,16 +163,24 @@ void stage_window_tick(double now) {
     if (!hwnd) hwnd = d3d::find_game_window(); // game thread: does not depend on Present running
     if (!hwnd) return;
     if (IsIconic(hwnd)) ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE); // must keep presenting
-    if (g_window_done) return;
-    g_window_done = true;
     wchar_t buf[4]{};
     if (GetEnvironmentVariableW(L"LIE_SHOW_GUEST", buf, 4) && buf[0] == L'1') return;
-    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW);
     RECT r{};
     GetWindowRect(hwnd, &r);
-    SetWindowPos(hwnd, HWND_BOTTOM, GetSystemMetrics(SM_XVIRTUALSCREEN) - (r.right - r.left) - 64, r.top, 0, 0,
+    // Desired x is re-derived from the CURRENT width every pass: request_frame_size later resizes the
+    // window with SWP_NOMOVE (it grows right off the same left edge), and UE re-centres the window on
+    // resolution apply, so a one-shot park lets it creep back on screen. Re-park on any drift.
+    const int want_x = GetSystemMetrics(SM_XVIRTUALSCREEN) - (r.right - r.left) - 64;
+    const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    const bool styled = (ex & WS_EX_TOOLWINDOW) && (ex & WS_EX_NOACTIVATE) && !(ex & WS_EX_APPWINDOW);
+    if (r.left == want_x && styled) return;
+    if (!styled) SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW);
+    SetWindowPos(hwnd, HWND_BOTTOM, want_x, r.top, 0, 0,
                  SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS);
-    log::info(L"headless: EL window moved off-screen (LIE_SHOW_GUEST=1 keeps it visible)");
+    if (!g_window_done) {
+        g_window_done = true;
+        log::info(L"headless: EL window moved off-screen (LIE_SHOW_GUEST=1 keeps it visible)");
+    }
 }
 
 void stage_reset() {
