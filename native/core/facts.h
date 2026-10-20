@@ -70,5 +70,8 @@ inline constexpr std::uint64_t kHeartbeatTimeoutMs = 2000;
 // [POLICY] Terrain scanner column pitch (UU): narrower than the smallest EL capsule diameter
 // (2 x 15 UU, read at runtime and asserted), so no gap the capsule could fall through is missed.
 inline constexpr double kTerrainColumnPitch = 16.0;
+// [POLICY] Terrain scanner band height (UU): the vertical twin of the column pitch. A column's coverage is a
+// set of absolute bands, so moving the window only adds / drops whole bands and never invalidates the rest.
+inline constexpr double kTerrainBandHeight = 256.0;
 
 } // namespace lie::facts

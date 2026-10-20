@@ -8,8 +8,13 @@
 // sound/design volumes and characters. Behaviour (one-way, moving, breakable) comes from the single registry
 // core/terrain_kinds.h. Every reconstructed interval is checked against its own component's shape
 // (K2_SphereOverlapComponent): open surfaces keep only their faces (terrain::resolve_shells).
-// Columns are refreshed round-robin under a per-frame time budget; a new revision is published only when
-// the merged rectangle set actually changes. tools\collision_check.ps1 diffs EM against the EL mirror.
+// Coverage lives on an absolute 2D grid: columns (Y) x bands (Z, facts::kTerrainBandHeight). The window only
+// decides which cells are wanted; moving it adds / drops whole cells and never invalidates the rest, so what
+// the Guest already has stays valid while new cells arrive. Invariant: a cell enters the window half_h away
+// from Lilac's feet and the cell nearest to her is scanned first on the next tick, so falls / dashes cannot
+// outrun the mirror. Cells are scanned nearest-first under a per-frame time budget (one trace pair covers a
+// contiguous run of wanted bands) and refreshed stalest-first; a new revision is published only when the
+// merged rectangle set actually changes. tools\collision_check.ps1 diffs EM against the EL mirror.
 
 #include "host/host.h"
 
@@ -44,7 +49,7 @@ constexpr double kWindowScreens = 1.5;
 // [POLICY] scanner time budget per frame (Oracle target: P99 <= 0.5 ms)
 constexpr double kBudgetMs = 0.4;
 constexpr int kMinColumnsPerTick = 2;
-// [POLICY] a fully scanned column is refreshed after this long (doors, breakable walls, moving blocks)
+// [POLICY] a scanned cell is refreshed after this long (doors, breakable walls, moving blocks)
 constexpr double kRefreshSeconds = 1.0;
 constexpr int kBlock = 2; // [UE] ECollisionResponse::ECR_Block
 // [POLICY] verdicts (does this component block Lilac, which mechanism) are re-read this often: doors and
@@ -53,11 +58,15 @@ constexpr double kVerdictSeconds = 2.0;
 // [POLICY] probe radius for "is this point inside the component's own shape"
 constexpr double kInsideProbeRadius = 1.0;
 
-struct Column {
+constexpr double kBand = facts::kTerrainBandHeight;
+// [POLICY] bands kept beyond the window on each side, so hovering at a band edge never rescans
+constexpr long long kBandKeep = 1;
+
+struct Cell {
     double scanned_at = 0.0;
-    double z_center = 0.0;
-    std::vector<terrain::Interval> solids;
+    std::vector<terrain::Interval> solids; // clipped to the band
 };
+using Column = std::map<long long, Cell>; // band index -> cell
 
 struct Verdict {
     ue::Weak comp; // a recycled address is a different component
@@ -73,8 +82,9 @@ struct State {
     int lilac_resp[32]{};
     bool have_profile = false;
     double half_w = 0.0, half_h = 0.0;
-    long long first = 0, last = -1;
-    double z_center = 0.0;
+    long long first = 0, last = -1;   // wanted columns
+    long long b_lo = 0, b_hi = -1;    // wanted bands
+    double foot = 0.0;
     bool dirty = false;
     bool ready = false;
     std::vector<TerrainRect> published;
@@ -174,13 +184,13 @@ std::vector<terrain::Face> trace(UObject* pawn, double x, double y, double z0, d
     return faces;
 }
 
-void scan(UObject* pawn, double plane_x, long long idx, double now) {
+// Scans bands [b0, b1] of column idx with one trace pair and stores the result per band.
+void scan(UObject* pawn, double plane_x, long long idx, long long b0, long long b1, double now) {
     const double y = static_cast<double>(idx) * facts::kTerrainColumnPitch;
-    const double z0 = g.z_center - g.half_h, z1 = g.z_center + g.half_h;
+    const double z0 = static_cast<double>(b0) * kBand, z1 = static_cast<double>(b1 + 1) * kBand;
     const auto tops = trace(pawn, plane_x, y, z1, z0);
     const auto bottoms = trace(pawn, plane_x, y, z0, z1);
-    Column& col = g.cols[idx];
-    auto solids = terrain::resolve_shells(terrain::component_intervals(tops, bottoms, z0, z1), z0, z1, [&](std::uint64_t id, double z) {
+    const auto solids = terrain::resolve_shells(terrain::component_intervals(tops, bottoms, z0, z1), z0, z1, [&](std::uint64_t id, double z) {
         const bool solid = inside(reinterpret_cast<UObject*>(id), plane_x, y, z);
         g.shells += solid ? 0u : 1u;
         return solid;
@@ -192,10 +202,14 @@ void scan(UObject* pawn, double plane_x, long long idx, double now) {
         }
         return true;
     };
-    if (col.scanned_at == 0.0 || !same(col.solids, solids)) g.dirty = true;
-    col.solids = std::move(solids);
-    col.scanned_at = now;
-    col.z_center = g.z_center;
+    Column& col = g.cols[idx];
+    for (long long b = b0; b <= b1; ++b) {
+        Cell& c = col[b];
+        auto piece = terrain::clip_intervals(solids, static_cast<double>(b) * kBand, static_cast<double>(b + 1) * kBand);
+        if (c.scanned_at == 0.0 || !same(c.solids, piece)) g.dirty = true;
+        c.solids = std::move(piece);
+        c.scanned_at = now;
+    }
 }
 
 void update_window(UObject* pc, const V3& lilac, double foot) {
@@ -211,14 +225,9 @@ void update_window(UObject* pc, const V3& lilac, double foot) {
     }
     g.half_w = half_w;
     g.half_h = half_h;
-    // Vertical window re-centres only when Lilac drifts by a quarter of it (keeps columns valid while jumping)
-    if (std::abs(foot - g.z_center) > half_h * 0.25 || g.cols.empty()) {
-        if (!g.cols.empty()) {
-            for (auto& [i, c] : g.cols) c.scanned_at = 0.0; // stale vertical range: rescan
-            g.ready = false;
-        }
-        g.z_center = foot;
-    }
+    g.foot = foot;
+    g.b_lo = static_cast<long long>(std::floor((foot - half_h) / kBand));
+    g.b_hi = static_cast<long long>(std::floor((foot + half_h) / kBand));
     g.first = static_cast<long long>(std::floor((lilac.y - half_w) / facts::kTerrainColumnPitch));
     g.last = static_cast<long long>(std::ceil((lilac.y + half_w) / facts::kTerrainColumnPitch));
 }
@@ -227,11 +236,14 @@ void publish(double plane_x, double focus_y) {
     std::vector<terrain::Column> cols;
     cols.reserve(static_cast<std::size_t>(g.last - g.first + 1));
     for (long long i = g.first; i <= g.last; ++i) {
-        auto it = g.cols.find(i);
-        cols.push_back({static_cast<double>(i) * facts::kTerrainColumnPitch, it == g.cols.end() ? std::vector<terrain::Interval>{} : it->second.solids});
+        std::vector<terrain::Interval> pieces;
+        if (auto it = g.cols.find(i); it != g.cols.end()) {
+            for (const auto& [b, c] : it->second) pieces.insert(pieces.end(), c.solids.begin(), c.solids.end());
+        }
+        cols.push_back({static_cast<double>(i) * facts::kTerrainColumnPitch, terrain::union_intervals(std::move(pieces))});
     }
     auto rects = terrain::merge_columns(cols, facts::kTerrainColumnPitch);
-    terrain::clamp_to_capacity(rects, kMaxTerrainRects, focus_y, g.z_center);
+    terrain::clamp_to_capacity(rects, kMaxTerrainRects, focus_y, g.foot);
     std::sort(rects.begin(), rects.end(), [](const TerrainRect& a, const TerrainRect& b) { return a.y != b.y ? a.y < b.y : a.z < b.z; });
     if (rects.size() == g.published.size() && std::equal(rects.begin(), rects.end(), g.published.begin(), [](const TerrainRect& a, const TerrainRect& b) {
             return a.y == b.y && a.z == b.z && a.hy == b.hy && a.hz == b.hz && a.roll_deg == b.roll_deg && a.flags == b.flags;
@@ -264,33 +276,55 @@ void terrain_tick(UObject* pc, UObject* pawn) {
     const double hh = ue::num(ue::obj(pawn, L"CapsuleComponent"), L"CapsuleHalfHeight");
     update_window(pc, l, l.z - hh);
     std::erase_if(g.cols, [](const std::pair<const long long, Column>& kv) { return kv.first < g.first - 8 || kv.first > g.last + 8; });
+    for (auto& [i, col] : g.cols) {
+        if (std::erase_if(col, [](const std::pair<const long long, Cell>& kv) { return kv.first < g.b_lo - kBandKeep || kv.first > g.b_hi + kBandKeep; })) g.dirty = true;
+    }
 
-    // Unscanned columns nearest to Lilac first, then the stalest ones
-    const long long centre = static_cast<long long>(std::llround(l.y / facts::kTerrainColumnPitch));
+    auto age = [](const Column* col, long long b) {
+        if (!col) return 0.0;
+        auto it = col->find(b);
+        return it == col->end() ? 0.0 : it->second.scanned_at;
+    };
+    auto wanted = [&](double at) { return at == 0.0 || t0 - at > kRefreshSeconds; };
+    // Unscanned cells nearest to Lilac's feet first, then the stalest ones
     int done = 0;
     for (;;) {
-        long long pick = 0;
-        double oldest = 1e300;
+        long long pick_i = 0, pick_b = 0;
         bool found = false;
-        for (long long r = 0; centre - r >= g.first || centre + r <= g.last; ++r) {
-            for (long long idx : {centre - r, centre + r}) {
-                if (idx < g.first || idx > g.last) continue;
-                auto it = g.cols.find(idx);
-                const double at = it == g.cols.end() ? 0.0 : it->second.scanned_at;
-                if (at == 0.0) { pick = idx; found = true; oldest = 0.0; break; }
-                if (t0 - at > kRefreshSeconds && at < oldest) { oldest = at; pick = idx; found = true; }
+        std::pair<int, double> best{2, 0.0}; // (0 unscanned: squared distance | 1 stale: scan time), lowest wins
+        for (long long i = g.first; i <= g.last; ++i) {
+            auto it = g.cols.find(i);
+            const Column* col = it == g.cols.end() ? nullptr : &it->second;
+            const double dy = static_cast<double>(i) * facts::kTerrainColumnPitch - l.y;
+            for (long long b = g.b_lo; b <= g.b_hi; ++b) {
+                const double at = age(col, b);
+                if (!wanted(at)) continue;
+                const double dz = std::max({0.0, static_cast<double>(b) * kBand - g.foot, g.foot - static_cast<double>(b + 1) * kBand});
+                const std::pair<int, double> rank = at == 0.0 ? std::pair{0, dy * dy + dz * dz} : std::pair{1, at};
+                if (rank < best) {
+                    best = rank;
+                    pick_i = i;
+                    pick_b = b;
+                    found = true;
+                }
             }
-            if (found && oldest == 0.0) break;
         }
         if (!found) break;
-        scan(pawn, l.x, pick, clock::now_s());
+        // one trace pair covers the contiguous run of wanted bands around the pick
+        auto it = g.cols.find(pick_i);
+        const Column* col = it == g.cols.end() ? nullptr : &it->second;
+        long long b0 = pick_b, b1 = pick_b;
+        while (b0 > g.b_lo && wanted(age(col, b0 - 1))) --b0;
+        while (b1 < g.b_hi && wanted(age(col, b1 + 1))) ++b1;
+        scan(pawn, l.x, pick_i, b0, b1, clock::now_s());
         ++done;
         if (done >= kMinColumnsPerTick && (clock::now_s() - t0) * 1000.0 > kBudgetMs) break;
     }
     bool complete = true;
     for (long long i = g.first; i <= g.last && complete; ++i) {
         auto it = g.cols.find(i);
-        complete = it != g.cols.end() && it->second.scanned_at != 0.0;
+        const Column* col = it == g.cols.end() ? nullptr : &it->second;
+        for (long long b = g.b_lo; b <= g.b_hi && complete; ++b) complete = age(col, b) != 0.0;
     }
     if (complete && !g.ready) {
         g.ready = true;
@@ -320,8 +354,8 @@ bool terrain_ready() { return g.ready && g.revision > 0; }
 
 std::string terrain_status() {
     char buf[256];
-    std::snprintf(buf, sizeof(buf), "terrain r%u rects=%zu cols=%zu window=[%lld,%lld] half=(%.0f,%.0f) ready=%d shells=%u p99=%.3fms", g.revision,
-                  g.published.size(), g.cols.size(), g.first, g.last, g.half_w, g.half_h, g.ready, g.shells, counters().terrain_ms_p99);
+    std::snprintf(buf, sizeof(buf), "terrain r%u rects=%zu cols=%zu window=[%lld,%lld]x[%lld,%lld] half=(%.0f,%.0f) ready=%d shells=%u p99=%.3fms",
+                  g.revision, g.published.size(), g.cols.size(), g.first, g.last, g.b_lo, g.b_hi, g.half_w, g.half_h, g.ready, g.shells, counters().terrain_ms_p99);
     return buf;
 }
 

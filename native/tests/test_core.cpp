@@ -131,6 +131,20 @@ static void test_terrain() {
     iv = lie::terrain::resolve_shells(comps, -500, 1000, hollow_a);
     CHECK(iv.size() == 1 && near(iv[0].lo, 400) && near(iv[0].hi, 400 + lie::terrain::kShellThickness));
 
+    // per-band storage: a solid [100, 700] and a platform [800, 820] split over 256-UU bands stitch back exactly
+    {
+        using lie::terrain::Interval;
+        const std::vector<Interval> col{{100, 700}, {800, 820}};
+        std::vector<Interval> pieces;
+        for (int b = 0; b < 4; ++b) {
+            auto p = lie::terrain::clip_intervals(col, b * 256.0, (b + 1) * 256.0);
+            pieces.insert(pieces.end(), p.begin(), p.end());
+        }
+        CHECK(pieces.size() == 4);
+        iv = lie::terrain::union_intervals(pieces);
+        CHECK(iv.size() == 2 && near(iv[0].lo, 100) && near(iv[0].hi, 700) && near(iv[1].lo, 800) && near(iv[1].hi, 820));
+    }
+
     // flat floor over 10 columns + a 3-column wall -> 2 rectangles
     const double dy = 16.0;
     std::vector<lie::terrain::Column> cols;

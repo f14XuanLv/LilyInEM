@@ -121,6 +121,17 @@ std::vector<Interval> resolve_shells(const std::vector<ComponentIntervals>& comp
     return union_intervals(std::move(all));
 }
 
+// The part of `in` inside [lo, hi]. A column is stored per absolute band; union_intervals stitches the
+// pieces back together (touching ends merge) whichever scans they came from.
+inline std::vector<Interval> clip_intervals(const std::vector<Interval>& in, double lo, double hi) {
+    std::vector<Interval> out;
+    for (const Interval& iv : in) {
+        const double a = std::max(iv.lo, lo), b = std::min(iv.hi, hi);
+        if (b > a) out.push_back({a, b, iv.flags});
+    }
+    return out;
+}
+
 // All shapes treated as closed volumes.
 inline std::vector<Interval> column_intervals(const std::vector<Face>& tops, const std::vector<Face>& bottoms, double z_min, double z_max) {
     return resolve_shells(component_intervals(tops, bottoms, z_min, z_max), z_min, z_max, [](std::uint64_t, double) { return true; });
