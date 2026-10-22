@@ -19,6 +19,7 @@
 - **只用 `devconfig.json` 指定的隔离实例**（`Win64_LilyInEM`）。禁止碰 `Win64_For_Mod_Dev`、`Win64_LAN_Host/Client`、`LAN_Test_Data`、ELMP 研究构建和正式存档。
 - **碰撞 / 能否穿越**：几何不分类，只看“与莱拉克胶囊互相 Block”+ 逐组件形状校验（开放曲面只保留表面）；行为机制（单向、移动、可破坏…）**只登记在 `native/core/terrain_kinds.h`**，Host 分类和 Guest 替身都从这张表读，不在别处按类名判断。验证用差分 Oracle：`tools\collision_check.ps1`（EM 用莱拉克 Profile、EL 用莉莉 Profile 探同一网格，退出码 = 不一致格数，理想为 0）；报告假障碍时先跑它。
 - 在线探针：`tools\eval.ps1 -Role host|guest -Code '<lua>'`（UEBridge，游戏线程执行）；截图：`tools\capture.ps1 -Role host -Name <n>`；离线资产：`tools\menuprobe --tree / --funcs`（CUE4Parse）。
+- 在线探针只读已确认类型的字段，**不要用 `ForEachProperty` 遍历并读取未知对象的全部属性**（曾因此把 EM 弄崩）。崩溃转储无调试器时，可用 Python 解析 minidump 的异常流 + 栈上返回地址定位模块。
 - 反射调用 UE 函数用 `ue::Call`（`ue.h`）；**不允许给事件传空 / 错误类型的结构体参数**（曾因 `FKeyEvent` 空指针把 Guest 弄崩）。
 - 类成员 / 函数签名以 `tools\menuprobe` dump 和 `native\*\` 里的 SDK 头为准；语义不确定时 grep `C:\Code2\UnrealEngine-4.26.2-release` 引擎源码，不猜。
 - 输入规则：见 `docs\INPUT_MATRIX.md` —— 莉莉动作键 = EL 设置，交互 = EM 键，撞键 EM 优先；菜单键一套（EM 的）。

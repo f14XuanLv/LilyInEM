@@ -54,14 +54,23 @@
 - [ ] 帧时间 Oracle（Host 全帧时间，不只是地形扫描耗时）。
 
 ### S2 受击管线（代码已写、未实测，可能需要调整）
-- [ ] 回放现在用的是兜底路径 B（`SetLastAttackerDirection` + `HPComponent::DoDamage` + `LaunchKnockback`）。击退数据暂时借用了莉莉 `KnockbackComponent.AirborneLaunchKnockback`。
+- [ ] 回放现在用的是兜底路径 B（`SetLastAttackerDirection` + `HPComponent::DoDamage` + `LaunchKnockback`）。
+  - 击退 = 莱拉克同等对待（2026-10-21，待实测）：要不要击退由 EM 原生决定（Host 截 `StartKnockback`）；Host 按 EM `StartKnockback` 的算法（IDA `0x144756150` / `0x144737340`，`core/combat_map.h em_push`）把冲量换成世界速度 + 击飞 / 踉跄判定（`ImpulseForceFactor`、`MinImpulseForLaunch`，步行需有竖直分量，游泳不击飞），分地面 / 空中 / 水中三档发给 Guest；Guest 以莉莉 `AirborneLaunchKnockback` 为底，换掉三档 `LaunchVector`（除掉 EL 的 `LaunchKnockbackFactor` × `MovementFactor`，`el_launch`）、`StunTime`、`bKnockbackUntilGrounded`。踉跄 = 零向量（EL 原生踉跄，没有 EM 踉跄的小位移）。
+  - 未计入 EM 的击退减免属性（`bCanImpulseForceBeReduced`，KnockbackComponent+452，未反射）。
+  - 旧版击退从未生效：EL 莉莉的组件属性名是 `Knockback`（`BP_Character_Base_C`），不是 `KnockbackComponent`；现按类取组件。
+  - 同一击的 `DoDamage` / `StartKnockback` 先后顺序不定，合并为一个 Hurt；只有击退没有伤害时不再 `DoDamage(0)`。
   - 目标是路径 A：生成 EL 敌人判定框（`/Game/_Zenith/Gameplay/Abilities/e2000_Knight/AbilityHitbox_e2000_Default`），设 `AE_Damage.AbsoluteDamage`、`AE_Knockback.bBypassStaminaCheck=1`，再调 `ExecuteAbilityEffectsOnTarget`（RVA `0x00CA5580`，需要先加进 EL.json），并保持实例存活直到效果队列跑完。这样格挡 / 弹反（芙莉蒂雅之戒）、受击无敌才完全走原生。
 - [ ] 元素 / 状态异常（燃烧、冰冻、电击）没有映射到 EL；目前只传了 element / type 字节，没有使用。
 - [ ] 持续伤害（毒雾）每跳都会产生一个 Hurt 事件，需要确认频率和体验。
 - [ ] `HurtPayload.source_id`：伤害来源可能是能力 Actor，Owner 链最多只回溯 4 层，可能取不到对应实体。
 
 ### S3 造伤管线（代码已写、未实测）
-- [ ] 代理类 `BP_e2010_Slime_C` 的 AssetRegistry 加载、`AutoPossessAI=0`、冻结、`HurtCapsule` 缩放：都还没验证。代理的 `HitCapsule` 关闭后可能仍有接触伤害组件需要处理。
+- [ ] 代理按种类（2026-10-21，待实测）：怪物 → `BP_e2010_Slime_C`，箱子 → `BP_Breakable_Base_C`（Destructible 类型的 `Box` 只重叠不阻挡，`OnPlayerOverlap` 为空，碎裂 / 掉落 / 清除标记只在死亡时执行）。
+  - 史莱姆代理曾让莉莉“被箱子击退”：史莱姆的 `OnFactionChange` 会重新打开 `HitCapsule`（EL 实测）。但同一个处理函数也负责给 `HurtCapsule` 设 `Enemy-Hurtbox` 配置——不调 `SetFaction` 时阵营为 0、配置为 `Custom`，莉莉打不中。所以：阵营不是 2 时先 `SetFaction(2)`，再关 `HitCapsule` / 根胶囊 / `TickTrigger`，只留 `HurtCapsule`。
+  - Host 实体普查曾在 BeginPlay 时就按阵营过滤，那时 EM 还没分配阵营 → 后加载的怪物全部漏掉（无代理）。现在所有 `CharacterZion` 都登记，发布时才按阵营过滤。
+  - **能力命中不走 `UHPComponent::DoDamage`**：AE_Damage（`0x140CB07E0`，虚函数）自己算伤害并直接写目标 `CurrHP`（+276）、广播受伤 / 死亡、通知攻击方（回蓝、遗物）。旧的 DoDamage 截获从没见过莉莉的攻击（hits 始终 0），45 HP 的史莱姆被原生一刀打死 = “箱子出血”/“只能打一次”。现在 detour AE_Damage：代理 HP 池设为 1e8，原生跑完取 HP 差值为伤害再补满，代理永不死；攻击方反应保持原生。代理被 EL 销毁后槽位清掉、重建。
+  - 待验证：`BP_Breakable_Base_C` 的 `Box` 是否被莉莉的攻击判定框接受（不接受就改用别的 EL 箱子子类）。
+  - EM 箱子尺寸取 `GetActorBounds(只算碰撞组件)`；Host 不再手动调 `OnBreakableReceivedDamage`（`DoDamage` 已广播同一委托，HP 归零经 `UDeathComponent::OnHPReachedZero` 碎裂）。
 - [ ] EM 侧结算目前是轻量路径（`StatHP::DoDamage` + `LaunchHitStop`）。没有 `ShakeComponent::LaunchShake`（需要 `FShakeData`）、削韧、部位破坏、火花和音效。
   - 完整路径：`Lilac.AbilityComponent.LaunchAbilityInstant(AEP_Player_Attacks_C …)`。注意：Lilac 的 `AbilityComponent` 目前在锁定列表里，Tick 已关闭。
 - [ ] 代理对莉莉攻击触发的击退，没有转发给 EM 的 `StartKnockback`。

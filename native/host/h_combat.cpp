@@ -44,7 +44,14 @@ constexpr double kEnemyHitStop = 0.05;
 
 struct Pending {
     HurtPayload hurt;
-    bool has_damage = false;
+};
+
+// FKnockbackData members [reflection, UE5: FVector = 3 doubles]
+struct KnockLayout {
+    ue::FProperty* impulse[3]{}; // KnockState order
+    ue::FProperty* stagger = nullptr;
+    ue::FProperty* auto_recovery = nullptr;
+    bool ready = false;
 };
 
 struct Tracked {
@@ -64,6 +71,7 @@ struct State {
     std::unique_ptr<EntitySnapshot> snap = std::make_unique<EntitySnapshot>();
     clock::Every pin{1.0}, census{2.0};
     int dd_damage = -1, dd_element = -1, dd_type = -1, dd_rate = -1, dd_size = 0;
+    KnockLayout kb;
     bool census_done = false;
 } g;
 
@@ -87,37 +95,73 @@ void resolve_damage_layout() {
     g.dd_size = st->GetPropertiesSize();
 }
 
+void resolve_knockback_layout() {
+    if (g.kb.ready) return;
+    auto* st = static_cast<ue::UStruct*>(ue::find(L"/Script/Zion.KnockbackData"));
+    if (!st) return;
+    const wchar_t* names[3] = {L"LocalSpaceImpulse_Grounded", L"LocalSpaceImpulse_Airborne", L"LocalSpaceImpulse_Swim"};
+    for (int i = 0; i < 3; ++i) g.kb.impulse[i] = ue::prop(st, names[i]);
+    g.kb.stagger = ue::prop(st, L"StaggerTime");
+    g.kb.auto_recovery = ue::prop(st, L"bLaunchAutoRecovery");
+    g.kb.ready = true;
+}
+
 bool intercepting() { return bridged() && !g.lethal_window; }
+
+// EM settles one hit as DoDamage and StartKnockback back to back, in either order: both halves go into one Hurt so
+// EL applies them together (a lone knockback first would start Lily's hit invincibility and swallow the damage).
+Pending& pending_for(bool damage) {
+    if (!g.pending.empty()) {
+        Pending& last = g.pending.back();
+        if (damage ? !(last.hurt.flags & kHurtDamage) : !last.hurt.knockback) return last;
+    }
+    return g.pending.emplace_back();
+}
 
 bool __fastcall on_do_damage(UObject* hp, UObject* source, const void* data) {
     if (hp && hp == g.lilac_hp.get() && intercepting()) {
         resolve_damage_layout();
-        Pending p;
+        HurtPayload& h = pending_for(true).hurt;
         if (data && g.dd_damage >= 0) {
             const auto* b = static_cast<const std::uint8_t*>(data);
-            p.hurt.damage_em = *reinterpret_cast<const std::int32_t*>(b + g.dd_damage);
-            if (g.dd_element >= 0) p.hurt.element = b[g.dd_element];
-            if (g.dd_type >= 0) p.hurt.type = b[g.dd_type];
+            h.damage_em = *reinterpret_cast<const std::int32_t*>(b + g.dd_damage);
+            if (g.dd_element >= 0) h.element = b[g.dd_element];
+            if (g.dd_type >= 0) h.type = b[g.dd_type];
         }
-        p.hurt.max_hp_em = static_cast<std::int32_t>(ue::call_num(hp, L"GetMaxValue"));
-        p.hurt.source_id = entity_id_of(source);
-        const V3 sl = ue::actor_location(source), ll = ue::actor_location(lilac());
-        p.hurt.dir_y = ll.y >= sl.y ? 1.0f : -1.0f; // pushed away from the source
-        p.has_damage = true;
-        g.pending.push_back(p);
+        h.max_hp_em = static_cast<std::int32_t>(ue::call_num(hp, L"GetMaxValue"));
+        h.source_id = entity_id_of(source);
+        if (!h.knockback) { // the knockback direction, when there is one, is EM's own
+            const V3 sl = ue::actor_location(source), ll = ue::actor_location(lilac());
+            h.dir_y = ll.y >= sl.y ? 1.0f : -1.0f; // pushed away from the source
+        }
+        h.flags |= kHurtDamage;
         ++counters().dmg_intercepted;
         return false; // EL settles it
     }
     return g_do_damage(hp, source, data);
 }
 
+// EM already decided that Lilac is knocked back (attack data, poise conditions). Record what EM would do to her:
+// the world velocity per movement state and whether it is a launch or a stagger (core/combat_map.h em_push).
 void __fastcall on_start_knockback(UObject* kb, const void* data, const void* dir) {
     if (kb && kb == g.lilac_kb.get() && intercepting()) {
+        resolve_knockback_layout();
+        HurtPayload& h = pending_for(false).hurt;
+        h.knockback = 1;
         const V3 d = dir ? ue::read_vec(dir, 24) : V3{}; // UE5 FVector = 3 doubles
-        if (g.pending.empty() || g.pending.back().hurt.knockback) g.pending.push_back({});
-        Pending& p = g.pending.back();
-        p.hurt.knockback = 1;
-        if (std::abs(d.y) > 1e-3) p.hurt.dir_y = d.y > 0.0 ? 1.0f : -1.0f;
+        const double factor = ue::num(kb, L"ImpulseForceFactor", 1.0), min_launch = ue::num(kb, L"MinImpulseForLaunch");
+        const auto* b = static_cast<const std::uint8_t*>(data);
+        for (int i = 0; b && i < 3; ++i) {
+            ue::FProperty* p = g.kb.impulse[i];
+            if (!p) continue;
+            const V3 l = ue::read_vec(b + p->GetOffset_Internal(), p->GetElementSize());
+            const combat::Push q = combat::em_push(l.x, l.y, l.z, d.x, d.y, d.z, factor, min_launch, static_cast<combat::Move>(i));
+            h.push[i] = {static_cast<float>(q.y), static_cast<float>(q.z)};
+            if (q.launch) h.flags |= static_cast<std::uint8_t>(kHurtLaunchGround << i);
+        }
+        if (b && g.kb.stagger) h.stagger = static_cast<float>(ue::read_num(g.kb.stagger, b + g.kb.stagger->GetOffset_Internal()));
+        if (b && g.kb.auto_recovery && ue::read_num(g.kb.auto_recovery, b + g.kb.auto_recovery->GetOffset_Internal()) != 0.0) h.flags |= kHurtAutoRecovery;
+        if (std::abs(d.y) > 1e-3) h.dir_y = d.y > 0.0 ? 1.0f : -1.0f;
         ++counters().kb_intercepted;
         return;
     }
@@ -137,9 +181,8 @@ void track(UObject* actor) {
     if (ue::is_a(actor, ue::find_class(L"/Script/Zion.Breakable"))) {
         kind = EntityKind::Breakable;
     } else if (ue::is_a(actor, ue::find_class(L"/Script/Zion.CharacterZion"))) {
-        UObject* fc = ue::obj(actor, L"FactionComponent");
-        if (!fc || static_cast<int>(ue::num(fc, L"Faction")) != facts::em::kFactionEnemy) return;
-        kind = EntityKind::Enemy;
+        kind = EntityKind::Enemy; // faction is checked when publishing: at BeginPlay it is not assigned yet
+
     } else {
         return;
     }
@@ -168,17 +211,35 @@ void publish_entities(UObject* pawn) {
         UObject* a = t.actor.get();
         UObject* hp = ue::obj(a, L"StatHPComponent");
         if (!hp || ue::call_num(hp, L"GetCurrValue") <= 0.0) continue;
-        const V3 p = ue::actor_location(a);
+        if (t.kind == EntityKind::Enemy) {
+            UObject* fc = ue::obj(a, L"FactionComponent");
+            if (!fc || static_cast<int>(ue::num(fc, L"Faction")) != facts::em::kFactionEnemy) continue;
+        }
+        V3 p = ue::actor_location(a);
+        UObject* cap = ue::obj(a, L"CapsuleComponent");
+        V3 half{0.0, cap ? ue::num(cap, L"CapsuleRadius", 40.0) : 60.0, cap ? ue::num(cap, L"CapsuleHalfHeight", 60.0) : 60.0};
+        if (t.kind == EntityKind::Breakable) { // no capsule: the colliding components (its hurtbox) give centre and size
+            Call bounds(a, L"GetActorBounds");
+            ue::FProperty* origin = bounds.param(L"Origin");
+            ue::FProperty* extent = bounds.param(L"BoxExtent");
+            if (origin && extent && bounds.b(true).skip().skip().b(false).go()) {
+                const V3 o = ue::read_vec(bounds.slot(origin), origin->GetElementSize());
+                const V3 x = ue::read_vec(bounds.slot(extent), extent->GetElementSize());
+                if (x.y > 1.0 && x.z > 1.0) {
+                    p = o;
+                    half = x;
+                }
+            }
+        }
         if (std::abs(p.y - l.y) > kEntityRadius || std::abs(p.z - l.z) > kEntityRadius) continue;
         if (s.count >= kMaxEntities) break;
         Entity& e = s.items[s.count++];
         e.id = t.id;
         e.kind = t.kind;
-        UObject* cap = ue::obj(a, L"CapsuleComponent");
         e.y = static_cast<float>(p.y);
         e.z = static_cast<float>(p.z);
-        e.hy = static_cast<float>(cap ? ue::num(cap, L"CapsuleRadius", 40.0) : 60.0);
-        e.hz = static_cast<float>(cap ? ue::num(cap, L"CapsuleHalfHeight", 60.0) : 60.0);
+        e.hy = static_cast<float>(half.y);
+        e.hz = static_cast<float>(half.z);
     }
     s.revision = g.entity_revision;
     if (World* w = shm::world()) w->entities.store(s);
@@ -207,8 +268,9 @@ void apply_hit(UObject* pawn, const HitEnemyPayload& h) {
     if (g.dd_rate >= 0) *reinterpret_cast<float*>(b + g.dd_rate) = 1.0f;
     dd.set_o(L"Source", pawn).go();
     ++counters().enemy_damage_calls;
+    // Breakables need nothing more: DoDamage broadcasts the HP delegate bound to ABreakable::OnBreakableReceivedDamage
+    // and HP reaching zero fires UDeathComponent::OnHPReachedZero [IDA 0x1446C0330, 0x1447024A0] -> break + drops.
     if (UObject* stop = ue::obj(target, L"HitStopComponent")) Call(stop, L"LaunchHitStop").f(kEnemyHitStop).go();
-    if (ue::class_contains(target, L"Breakable")) Call(target, L"OnBreakableReceivedDamage").o(pawn).i(dmg).go();
 }
 
 void kill_lilac(UObject* pawn) {

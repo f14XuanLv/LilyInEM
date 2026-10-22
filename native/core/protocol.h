@@ -19,7 +19,7 @@
 namespace lie {
 
 inline constexpr std::uint32_t kMagic = 0x4D45494Cu; // "LIEM"
-inline constexpr std::uint32_t kProtocol = 7;
+inline constexpr std::uint32_t kProtocol = 8;
 inline constexpr const wchar_t* kControlShmName = L"Local\\LilyInEM_Control_v1";
 inline constexpr const wchar_t* kWorldShmName = L"Local\\LilyInEM_World_v1";
 
@@ -313,12 +313,27 @@ struct ShiftPayload {
     double dy = 0.0;
 };
 
+// Knockback as EM would apply it to Lilac (core/combat_map.h em_push): world velocity in the Y/Z plane
+struct KnockPush {
+    float y = 0.0f, z = 0.0f;
+};
+enum HurtFlags : std::uint8_t {
+    kHurtDamage = 1u << 0,          // EM settled damage on Lilac (a knockback-only push has none)
+    kHurtLaunchGround = 1u << 1,    // EM would launch (not just stagger) Lilac in this movement state
+    kHurtLaunchAir = 1u << 2,
+    kHurtLaunchSwim = 1u << 3,
+    kHurtAutoRecovery = 1u << 4,    // EM ends the launch on a timer instead of waiting for landing
+};
+enum KnockState : int { kKnockGround = 0, kKnockAir = 1, kKnockSwim = 2 };
+
 struct HurtPayload {
     std::uint32_t source_id = 0;    // Entity id (0 = hazard / unknown)
     std::int32_t damage_em = 0;
     std::int32_t max_hp_em = 0;     // Lilac's real maximum at hit time
-    std::uint8_t element = 0, type = 0, knockback = 0, pad = 0;
-    float dir_y = 0.0f;             // sign of the push along Y (+1 right)
+    std::uint8_t element = 0, type = 0, knockback = 0, flags = 0; // HurtFlags
+    float dir_y = 0.0f;             // sign of the push along Y (+1 right), away from the source
+    float stagger = 0.0f;           // EM FKnockbackData::StaggerTime
+    KnockPush push[3]{};            // KnockState: grounded / airborne / swimming
 };
 
 enum class MenuKind : std::uint32_t {

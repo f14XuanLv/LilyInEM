@@ -226,6 +226,32 @@ static void test_combat() {
     CHECK(s.lethal && s.apply == 119);
     s = lie::combat::split_lethal(5, 1);
     CHECK(s.lethal && s.apply == 0);
+
+    using lie::combat::Move;
+    const auto near = [](double a, double b) { return std::abs(a - b) < 1e-6; };
+    // pushed right (+Y): local X maps onto +Y, Z stays up, both scaled by ImpulseForceFactor
+    auto p = lie::combat::em_push(500, 0, 400, 0, 1, 0, 1.5, 300, Move::Ground);
+    CHECK(near(p.y, 750) && near(p.z, 600) && p.launch);
+    // pushed left: the horizontal part flips, the vertical part does not
+    p = lie::combat::em_push(500, 0, 400, 0, -1, 0, 1.0, 300, Move::Air);
+    CHECK(near(p.y, -500) && near(p.z, 400) && p.launch);
+    // below MinImpulseForLaunch: stagger only
+    p = lie::combat::em_push(100, 0, 100, 0, 1, 0, 1.0, 300, Move::Air);
+    CHECK(!p.launch);
+    // walking needs a vertical component to launch; swimming never launches
+    CHECK(!lie::combat::em_push(1000, 0, 0, 0, 1, 0, 1.0, 300, Move::Ground).launch);
+    CHECK(lie::combat::em_push(1000, 0, 0, 0, 1, 0, 1.0, 300, Move::Air).launch);
+    CHECK(!lie::combat::em_push(1000, 0, 1000, 0, 1, 0, 1.0, 300, Move::Swim).launch);
+    // local Y and world X never reach the 2D plane when the push is along Y
+    p = lie::combat::em_push(0, 800, 0, 0, 1, 0, 1.0, 300, Move::Air);
+    CHECK(near(p.y, 0) && near(p.z, 0) && !p.launch);
+    // EL: undo LaunchKnockbackFactor / MovementFactor so Lily ends up with EM's velocity; stagger -> zero vector
+    auto l = lie::combat::el_launch({-750, 600, true}, 2.0, 1.5, 1.0);
+    CHECK(near(l.x, 250) && near(l.z, 300));
+    l = lie::combat::el_launch({-750, 600, false}, 1.0, 1.0, 1.0);
+    CHECK(l.x == 0.0 && l.z == 0.0);
+    l = lie::combat::el_launch({300, 200, true}, 0.0, 0.0, 0.0); // missing readings pass through
+    CHECK(near(l.x, 300) && near(l.z, 200));
 }
 
 static std::string slurp(const std::string& path) {
@@ -242,7 +268,7 @@ static void test_manifests() {
     CHECK(el->module == "EnderLiliesSteam-Win64-Shipping.exe");
     CHECK(el->accepts_sha256("9B939A44457D78AF1F5E8B90EF0F88B95D7DBC35A330350F2EF1E100CDD48329"));
     CHECK(!el->accepts_sha256("34FD2C50091A41FE60484AFBC08DFCFDC23AC68D2834AA93C9058FB7EC270FFA"));
-    for (const char* f : {"InputConsume", "GameplayCameraUpdate", "HPComponentDoDamage"}) CHECK(el->fn(f) != nullptr);
+    for (const char* f : {"InputConsume", "GameplayCameraUpdate", "HPComponentDoDamage", "AEDamageApply"}) CHECK(el->fn(f) != nullptr);
     CHECK(el->fn("InputConsume")->rva == 0x00CEF310 && el->fn("InputConsume")->prefix.front() == 0x48);
     CHECK(el->offset("ZenithInputComponent.InputSnapshot").value_or(0) == 224);
 

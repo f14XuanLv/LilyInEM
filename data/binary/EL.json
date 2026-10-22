@@ -25,7 +25,13 @@
       "rva": "0x00CA0380",
       "prefix": "40535541564883EC3083B91401000000418BE84C8BF2488B",
       "signature": "void UHPComponent::DoDamage(this, AActor* From, int32 Damage, bool bJustGuarding, bool bGuarding)",
-      "note": "Final HP settlement, called natively through the vtable (invisible to UFunction hooks). Guest records hits on EM-enemy proxies here. IDA + ELMP."
+      "note": "HP settlement for direct callers (the Guest's Hurt replay on Lily). Ability hits do NOT come through here: AE_Damage inlines the same settlement (see AEDamageApply). IDA + ELMP."
+    },
+    "AEDamageApply": {
+      "rva": "0x00CB07E0",
+      "prefix": "4D85C00F840A0300005557415641574883EC48",
+      "signature": "void UAE_DamageComponent::ApplyDamage(this, AActor* Instigator, AActor* Target, FHitEntry* Entry)",
+      "note": "Virtual on the AE_Damage effect (vtables 0x14340C888 / 0x14343E618 / 0x14343EA50): computes the hit's damage and writes the target HPComponent CurrHP (+276) directly, then notifies the instigator (OnDamagedEnemy: MP, relics). The Guest measures hits on EM proxies here. IDA."
     }
   },
   "offsets": {
